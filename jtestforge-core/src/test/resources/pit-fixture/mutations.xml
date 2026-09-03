@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mutations>
+    <mutation detected='true' status='KILLED' numberOfTestsRun='1'>
+        <sourceFile>Calculator.java</sourceFile>
+        <mutatedClass>com.acme.Calculator</mutatedClass>
+        <mutatedMethod>add</mutatedMethod>
+        <methodDescription>(II)I</methodDescription>
+        <lineNumber>12</lineNumber>
+        <mutator>org.pitest.mutationtest.engine.gregor.mutators.MathMutator</mutator>
+        <indexes>
+            <index>3</index>
+        </indexes>
+        <blocks>
+            <block>0</block>
+        </blocks>
+        <killingTest>com.acme.CalculatorTest.addsTwoNumbers(3/5)</killingTest>
+        <description>Replaced integer addition with subtraction</description>
+    </mutation>
+    <mutation detected='false' status='SURVIVED' numberOfTestsRun='1'>
+        <sourceFile>Calculator.java</sourceFile>
+        <mutatedClass>com.acme.Calculator</mutatedClass>
+        <mutatedMethod>classify</mutatedMethod>
+        <methodDescription>(I)I</methodDescription>
+        <lineNumber>20</lineNumber>
+        <mutator>org.pitest.mutationtest.engine.gregor.mutators.ConditionalsBoundaryMutator</mutator>
+        <indexes>
+            <index>5</index>
+        </indexes>
+        <blocks>
+            <block>1</block>
+        </blocks>
+        <killingTest/>
+        <description>changed conditional boundary</description>
+    </mutation>
+    <mutation detected='false' status='NO_COVERAGE' numberOfTestsRun='0'>
+        <sourceFile>Calculator.java</sourceFile>
+        <mutatedClass>com.acme.Calculator</mutatedClass>
+        <mutatedMethod>reset</mutatedMethod>
+        <methodDescription>()V</methodDescription>
+        <lineNumber>30</lineNumber>
+        <mutator>org.pitest.mutationtest.engine.gregor.mutators.VoidMethodCallMutator</mutator>
+        <indexes>
+            <index>1</index>
+        </indexes>
+        <blocks>
+            <block>0</block>
+        </blocks>
+        <killingTest/>
+        <description>removed call to java/util/List::clear</description>
+    </mutation>
+    <mutation detected='false' status='NON_VIABLE' numberOfTestsRun='0'>
+        <sourceFile>Calculator.java</sourceFile>
+        <mutatedClass>com.acme.Calculator</mutatedClass>
+        <mutatedMethod>&lt;init&gt;</mutatedMethod>
+        <methodDescription>()V</methodDescription>
+        <lineNumber>8</lineNumber>
+        <mutator>org.pitest.mutationtest.engine.gregor.mutators.experimental.MemberVariableMutator</mutator>
+        <indexes>
+            <index>0</index>
+        </indexes>
+        <blocks>
+            <block>0</block>
+        </blocks>
+        <killingTest/>
+        <description>removed assignment</description>
+    </mutation>
+</mutations>

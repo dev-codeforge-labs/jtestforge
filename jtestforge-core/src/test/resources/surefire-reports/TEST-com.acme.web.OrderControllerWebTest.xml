@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.acme.web.OrderControllerWebTest" time="1.204" tests="2" errors="2" skipped="0" failures="0">
+  <testcase name="returnsTheOrderForAKnownId" classname="com.acme.web.OrderControllerWebTest" time="0.602">
+    <error message="Failed to load ApplicationContext" type="org.springframework.beans.factory.BeanCreationException">org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'orderService'
+	at org.springframework.beans.factory.support.ConstructorResolver.instantiate(ConstructorResolver.java:658)
+	Caused by: java.lang.IllegalStateException: Failed to load ApplicationContext
+</error>
+  </testcase>
+  <testcase name="rejectsAnInvalidPayload" classname="com.acme.web.OrderControllerWebTest" time="0.602">
+    <error message="null pointer" type="java.lang.NullPointerException">java.lang.NullPointerException: Cannot invoke "OrderService.findById(long)" because "this.orderService" is null
+	at com.acme.web.OrderController.findById(OrderController.java:24)
+</error>
+  </testcase>
+</testsuite>

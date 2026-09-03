@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!--
+        Console: humans reading the run as it happens. User-facing progress and results
+        go through com.devmanchego.jtestforge.cli.ConsoleOutput instead of this appender
+        (see jtestforge-specification.md §17) - this is diagnostic logging only.
+    -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+    </appender>
+
+    <!--
+        File: the full run log, one file per JTestForge invocation. The state directory
+        is where transcripts and backups already live (see spec §8, §12.2), so the log
+        joins them there rather than in a separate, easy-to-lose location.
+    -->
+    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+        <file>${jtestforge.stateDir:-.jtestforge}/run.log</file>
+        <append>true</append>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{50} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="FILE" />
+    </root>
+
+</configuration>

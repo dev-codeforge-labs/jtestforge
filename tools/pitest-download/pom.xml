@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Not part of the JTestForge reactor (not listed in ../../pom.xml's <modules>) and not
+    meant to be built. Its only job is to give Maven a plugin declaration to resolve, so
+    that running it once WITH internet access populates the local repository
+    (~/.m2/repository/org/pitest/...) with everything `jtestforge harden` needs -
+    PitestMavenPluginRunner invokes `org.pitest:pitest-maven:mutationCoverage` directly
+    (jtestforge-core/src/main/java/com/devmanchego/jtestforge/mutation/PitestMavenPluginRunner.java),
+    and the target project is JUnit 5, which PIT's core does not understand without the
+    pitest-junit5-plugin dependency declared below.
+
+    Usage (once, with internet access) - BOTH goals are needed:
+
+        mvn -f pom.xml dependency:resolve-plugins
+        mvn -f pom.xml dependency:resolve
+
+    Two goals, not one, and this is not redundancy: "resolve-plugins" fetches
+    pitest-maven itself plus its own transitive dependencies, but it does NOT fetch the
+    <dependencies> declared inside a <plugin> element - Maven only resolves those when
+    the plugin actually executes. pitest-junit5-plugin is therefore ALSO declared as a
+    project-level <dependency> below, purely so "dependency:resolve" pulls it into the
+    local repository. Skipping the second goal is not a harmless omission: PIT would then
+    run, find zero JUnit 5 tests, and report every mutant as SURVIVED - a plausible-looking
+    but completely wrong mutation score, rather than an error anyone would notice.
+
+    Verify afterwards that BOTH of these exist in the local repository:
+        <localRepo>/org/pitest/pitest-maven/
+        <localRepo>/org/pitest/pitest-junit5-plugin/
+    (find the local repo path with: mvn help:evaluate -Dexpression=settings.localRepository -DforceStdout -q)
+
+    If the pinned versions below are stale by the time you run this, bump them to
+    whatever's current on Maven Central (https://central.sonatype.com/artifact/org.pitest/pitest-maven)
+    and re-run - a 404 here just means "try a newer version", nothing else in this file
+    needs to change.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.devmanchego.jtestforge.tools</groupId>
+    <artifactId>pitest-download</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <!--
+        Declared here as well as inside the plugin below, and only so that
+        `dependency:resolve` downloads it - see the usage note at the top of this file.
+        Nothing compiles against it.
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-junit5-plugin</artifactId>
+            <version>1.2.1</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.pitest</groupId>
+                <artifactId>pitest-maven</artifactId>
+                <version>1.15.8</version>
+                <dependencies>
+                    <!-- PIT's core only understands JUnit 4-style runners; every test
+                         JTestForge generates is JUnit 5, so this is mandatory, not optional. -->
+                    <dependency>
+                        <groupId>org.pitest</groupId>
+                        <artifactId>pitest-junit5-plugin</artifactId>
+                        <version>1.2.1</version>
+                    </dependency>
+                </dependencies>
+            </plugin>
+        </plugins>
+    </build>
+</project>

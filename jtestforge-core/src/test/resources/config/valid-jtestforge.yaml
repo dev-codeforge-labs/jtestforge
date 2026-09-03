@@ -1,0 +1,32 @@
+project:
+  modulePath: ${env:JTF_TEST_MODULE_PATH}
+  mavenExecutable: mvn
+  testSourceRoot: src/test/java
+
+selection:
+  includePackages: ["com.acme.service"]
+  minComplexity: 3
+  order: alphabetical
+
+aiProvider:
+  active: claude
+  providers:
+    claude:
+      command: ${env:JTF_TEST_COMMAND}
+      args: ["-p", "--output-format", "text"]
+      promptDelivery: stdin
+      timeoutSeconds: 120
+
+prompts:
+  newTestClass: prompts/new-test-class.md
+  additionalTests: prompts/additional-tests.md
+  killMutants: prompts/kill-mutants.md
+  fixCompilation: prompts/fix-compilation.md
+  fixAssertion: prompts/fix-assertion.md
+  rules: prompts/rules.md
+
+spring:
+  enabled: false
+
+execution:
+  stateDir: .jtestforge

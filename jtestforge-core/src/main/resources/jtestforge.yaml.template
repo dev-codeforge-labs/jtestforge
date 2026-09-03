@@ -1,0 +1,150 @@
+# =============================================================================
+# JTestForge configuration
+# =============================================================================
+
+project:
+  # Maven module JTestForge operates on. Must build green before a run.
+  modulePath: .
+  mavenExecutable: mvn
+  # Extra args prepended to every Maven invocation. -o keeps the loop offline.
+  mavenArgs: ["-o", "-B"]
+  # javaHome: C:/Program Files/Java/jdk-21
+  testSourceRoot: src/test/java
+  mainSourceRoot: src/main/java
+  # Test class naming for a production class Foo -> FooTest.
+  # One class per tier (7.2); an existing slice class is detected by its annotations
+  # rather than by its name, so these suffixes only govern files JTestForge creates.
+  testClassSuffix: Test
+  testClassSuffixByTier:
+    WEB_SLICE:     WebTest
+    DATA_SLICE:    DataTest
+    JSON_SLICE:    JsonTest
+    CONTEXT_SLICE: ContextTest
+
+# --- What to work on ---------------------------------------------------------
+selection:
+  includePackages: []
+  excludePackages: []
+  # Never touched: JPA entities, DTOs, generated sources, anything matching these.
+  excludeClasses:
+    - "**/*Config"
+    - "**/*Application"
+    - "**/dto/**"
+  # Skip classes annotated with any of these (entities are behaviour-free).
+  excludeAnnotations: ["jakarta.persistence.Entity", "lombok.Generated"]
+  # A method below this cyclomatic complexity is not worth a generated test.
+  minComplexity: 2
+  includePrivateMethods: false
+  # Ordering of work units. lowestCoverageFirst puts the biggest wins first.
+  order: lowestCoverageFirst   # lowestCoverageFirst | alphabetical | declaration
+
+# --- AI provider -------------------------------------------------------------
+aiProvider:
+  active: claude
+  providers:
+    claude:
+      command: claude
+      # Argument LIST, never a single string: quoting on Windows is a bug farm.
+      args: ["-p", "--output-format", "text"]
+      promptDelivery: stdin        # stdin | argument | file
+      timeoutSeconds: 300
+      # Retries for transport failures only (non-zero exit, timeout, empty output).
+      transportRetries: 2
+    gemini:
+      command: gemini.cmd
+      args: ["-p"]
+      promptDelivery: argument
+      timeoutSeconds: 300
+      transportRetries: 2
+  # API keys are NEVER read from this file. They are inherited from the process
+  # environment, exactly as the CLI itself expects them.
+
+# --- Prompt templates --------------------------------------------------------
+# External files so they can be versioned and A/B compared without recompiling.
+prompts:
+  newTestClass:     prompts/new-test-class.md
+  additionalTests:  prompts/additional-tests.md
+  killMutants:      prompts/kill-mutants.md
+  fixCompilation:   prompts/fix-compilation.md
+  fixAssertion:     prompts/fix-assertion.md
+  # Spring tiers (see 7.4). Selected by the tier of the work unit.
+  webSliceTests:    prompts/spring-web-slice.md
+  dataSliceTests:   prompts/spring-data-slice.md
+  jsonSliceTests:   prompts/spring-json-slice.md
+  contextTests:     prompts/spring-context.md
+  # Shared rules blocks appended to every prompt (style, banned constructs).
+  rules:            prompts/rules.md
+  springRules:      prompts/spring-rules.md
+
+# --- Spring support ----------------------------------------------------------
+spring:
+  # auto = enable only if spring-test / spring-boot-starter-test is on the test
+  # classpath. JTestForge never adds a dependency to the target pom.
+  enabled: auto                 # auto | true | false
+  tiers:
+    plainUnit: true             # T0 - JUnit 5 + Mockito, no Spring context
+    webSlice: true               # T1 - @WebMvcTest + MockMvc
+    dataSlice: true              # T2 - @DataJpaTest + embedded database
+    jsonSlice: true              # T3 - @JsonTest / @ConfigurationProperties binding
+    contextSlice: false          # T4 - minimal @SpringBootTest(classes = ...)
+  # Always pick the cheapest tier that can close the gap (7.4).
+  preferLowestTier: true
+  # Propose a Spring test even at 100% line coverage when framework semantics
+  # (mappings, validation, security, transactions, proxies) are unverified (7.5).
+  detectFrameworkSemanticGaps: true
+  embeddedDatabase: auto        # auto | h2 | hsqldb | derby | none
+  allowTestcontainers: false    # needs Docker; slow; opt-in only
+  # An ApplicationContext load is the expensive unit of work in a Spring run.
+  maxContextLoadsPerRun: 40
+  contextLoadTimeoutSeconds: 120
+  # Generated tests must never fork or evict the Spring context cache (7.6).
+  enforceContextKeyStability: true
+  forbidDirtiesContext: true
+  # auto = @MockitoBean on Framework 6.2+/Boot 3.4+, @MockBean below.
+  mockBeanAnnotation: auto      # auto | mockBean | mockitoBean
+
+# --- Context injection -------------------------------------------------------
+context:
+  includeFullProductionClass: true
+  includeCollaboratorSignatures: true   # signatures of injected dependencies
+  maxCollaborators: 12
+  includeExistingTestClass: true
+  maxExistingTestChars: 20000
+  includeDetectedFrameworkVersions: true  # JUnit/Mockito/AssertJ from the pom
+  maxPromptChars: 60000
+
+# --- Pass 1: generate --------------------------------------------------------
+generate:
+  maxTestsPerMethod: 5
+  maxRepairAttempts: 2          # compilation/assertion repair rounds per unit
+  requireCoverageGain: true     # discard a test that adds no covered line/branch
+  requireAssertion: true        # discard a test with no assertion (11.1)
+  rejectMockOnlyTests: true     # discard a test whose only checks are verify(...)
+
+# --- Pass 2: harden ----------------------------------------------------------
+harden:
+  engine: pitestMavenPlugin     # pitestMavenPlugin | standaloneWrapper
+  # standaloneWrapperJar: C:/tools/pitest-wrapper.jar   # when engine=standaloneWrapper
+  mutators: DEFAULTS            # DEFAULTS | STRONGER | <explicit comma list>
+  maxMutantsPerPrompt: 6
+  maxAttemptsPerMutant: 2
+  minMutationScore: 70          # informational threshold for the report / exit code
+  # Highest tier whose tests may be used as PIT's test set. PIT re-runs the suite
+  # once per mutant; a slice test is orders of magnitude costlier than a unit test,
+  # and controller mapping/validation logic lives in annotations, which PIT does not
+  # mutate anyway. Raise deliberately, never by default. T4 is never permitted.
+  maxTierForMutation: PLAIN_UNIT   # PLAIN_UNIT | WEB_SLICE | DATA_SLICE | JSON_SLICE
+  # Mutants proven unkillable (equivalent mutants, logging, etc). Persistent.
+  unkillableMutantsFile: .jtestforge/unkillable.txt
+  # PIT history file for incremental analysis. Big speed win across runs.
+  historyFile: .jtestforge/pit-history.bin
+
+# --- Execution & safety ------------------------------------------------------
+execution:
+  # NOT under target/ - 'mvn clean' would wipe the run state.
+  stateDir: .jtestforge
+  backupOriginalTests: true
+  dryRun: false
+  # Abort the run after this many consecutive discarded units (model is unhelpful).
+  consecutiveFailureAbort: 5
+  maxUnitsPerRun: 0             # 0 = unlimited

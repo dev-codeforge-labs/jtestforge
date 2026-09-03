@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.devmanchego.jtestforge</groupId>
+        <artifactId>jtestforge-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>jtestforge-cli</artifactId>
+    <packaging>jar</packaging>
+
+    <name>JTestForge :: CLI</name>
+    <description>
+        Picocli front-end for JTestForge. Produces the runnable fat jar
+        (java -jar jtestforge-&lt;version&gt;.jar) via mvn install.
+    </description>
+
+    <properties>
+        <!-- Filled into META-INF/MANIFEST.MF; JTestForgeCommand.class references it -->
+        <jtestforge.mainClass>com.devmanchego.jtestforge.cli.JTestForgeCommand</jtestforge.mainClass>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.devmanchego.jtestforge</groupId>
+            <artifactId>jtestforge-core</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>info.picocli</groupId>
+            <artifactId>picocli</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>jtestforge-${project.version}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+
+            <!--
+                Populates Implementation-Version in the plain jar's manifest before
+                shading, which is what ManifestVersionProvider reads for the version flag.
+                The shade plugin's ManifestResourceTransformer only sets Main-Class; it
+                does not overwrite entries already present, so this survives shading.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+
+            <!--
+                Bound to the default `package` phase, so a plain `mvn install`
+                (which runs package first) produces the runnable fat jar and installs
+                it into the local repository. See jtestforge-specification.md §4.1.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>${jtestforge.mainClass}</mainClass>
+                                </transformer>
+                                <!--
+                                    Required: the AI-provider SPI and several dependencies
+                                    (JavaParser, SLF4J) rely on META-INF/services. Without
+                                    this transformer, shading silently drops all but one
+                                    provider's service file per interface.
+                                -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

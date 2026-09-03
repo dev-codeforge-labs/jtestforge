@@ -1,0 +1,23 @@
+# Private / local-only files, never committed
+.private/
+
+# Maven build output
+target/
+
+# JTestForge's own run state, wherever it's left behind by a local or fixture-module run
+.jtestforge/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
