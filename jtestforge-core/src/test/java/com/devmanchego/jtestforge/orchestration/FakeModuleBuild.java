@@ -41,7 +41,13 @@ final class FakeModuleBuild implements ModuleBuild {
 
     FakeModuleBuild failsToCompile(String message) {
         compileOutcomes.add(CompileOutcome.failure(List.of(
-                new CompilerError("PaymentServiceTest.java", 42, 9, message))));
+                new CompilerError("PaymentServiceTest.java", 42, 9, message)), "[ERROR] " + message));
+        return this;
+    }
+
+    /** A build failure {@code CompilerErrorParser} could not extract any diagnostic from. */
+    FakeModuleBuild failsToCompileWithoutDiagnostics(String rawLog) {
+        compileOutcomes.add(CompileOutcome.failure(List.of(), rawLog));
         return this;
     }
 
@@ -64,6 +70,18 @@ final class FakeModuleBuild implements ModuleBuild {
 
     FakeModuleBuild fullSuiteRed() {
         fullSuiteOutcomes.add(new TestRunOutcome(List.of(failing("anExistingTest", "interaction"))));
+        return this;
+    }
+
+    /** Maven fails before the test phase, so Surefire reports nothing at all - a module that does not compile. */
+    FakeModuleBuild fullSuiteBuildFails(String buildLog) {
+        fullSuiteOutcomes.add(new TestRunOutcome(List.of(), false, buildLog));
+        return this;
+    }
+
+    /** The scoped run fails without Surefire reporting a single result - the tests never ran. */
+    FakeModuleBuild scopedRunNeverRan(String buildLog) {
+        scopedRunOutcomes.add(new TestRunOutcome(List.of(), false, buildLog));
         return this;
     }
 

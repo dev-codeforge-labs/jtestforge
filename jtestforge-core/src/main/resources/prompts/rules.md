@@ -5,6 +5,27 @@ produce is compiled, run in isolation, and measured. Anything that does not comp
 not pass, or does not move a measured metric is discarded automatically — so a test that
 merely looks plausible is worth nothing here.
 
+## Answer from this prompt alone — you have no tools here
+
+Do **not** attempt to call any tool: no shell commands, no reading files, no listing
+directories, no globbing, no searching the codebase, no web access, no retrieving context
+from anywhere. Every such call is refused, and each refused call costs a full round trip
+that delays your answer without telling you anything.
+
+There is nothing to look for. This prompt already contains everything that exists for this
+task: the full source of the class under test, the signatures of its collaborators, the
+current contents of the test class, and the exact libraries available on the classpath.
+The directory you are running in is empty by design.
+
+**If a dependency or implementation detail is missing, do not go looking for it.** Pick the
+most reasonable stub or fake for it — built only from the libraries listed as available
+above — and carry on. Never base a test on code that is not in this prompt: if you cannot
+see a method's body, test it only through the behaviour you can observe from its signature
+and the class you were given.
+
+Answer in your first response, and put nothing outside the two fenced blocks the response
+format below specifies: no preamble, no narration of your reasoning, no closing remarks.
+
 ## The one question that decides whether a test is worth writing
 
 **Would this test still pass if the method under test were deliberately broken?**

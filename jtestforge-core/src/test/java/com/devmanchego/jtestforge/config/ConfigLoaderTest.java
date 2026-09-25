@@ -36,6 +36,33 @@ class ConfigLoaderTest {
         assertThat(result.configHash()).startsWith("sha256:");
     }
 
+    /**
+     * The scaffolded template ships {@code javaVersion:}, {@code dependencyTreeFile:},
+     * {@code localRepository:} and {@code javaHome:} with nothing after the colon, so a
+     * user sees them and knows they exist without needing to uncomment anything. YAML
+     * binds an empty scalar to {@code null}, which every reader of these fields already
+     * treats as "not set" - so this must not become the literal string {@code ""}.
+     */
+    @Test
+    void emptyScalarsInTheProjectBlockBindToNullRatherThanAnEmptyString(@TempDir Path dir) throws IOException {
+        Path yamlFile = dir.resolve("jtestforge.yaml");
+        Files.writeString(yamlFile, """
+                project:
+                  modulePath: .
+                  javaHome:
+                  javaVersion:
+                  dependencyTreeFile:
+                  localRepository:
+                """);
+
+        ProjectConfig project = loader.load(yamlFile, Map.of()).config().project();
+
+        assertThat(project.javaHome()).isNull();
+        assertThat(project.javaVersion()).isNull();
+        assertThat(project.dependencyTreeFile()).isNull();
+        assertThat(project.localRepository()).isNull();
+    }
+
     @Test
     void unknownTopLevelKeysProduceAWarningRatherThanAFailure(@TempDir Path dir) throws IOException {
         Path yamlFile = dir.resolve("jtestforge.yaml");

@@ -1,5 +1,6 @@
 package com.devmanchego.jtestforge.config;
 
+import com.devmanchego.jtestforge.build.JavaRelease;
 import com.devmanchego.jtestforge.model.Tier;
 import com.devmanchego.jtestforge.util.ExecutableResolver;
 
@@ -21,6 +22,7 @@ public final class ConfigValidator {
         List<ConfigViolation> warnings = new ArrayList<>();
 
         checkModulePath(config, errors);
+        checkDependencyInputs(config, context, errors);
         checkActiveProviderResolvable(config, context, errors);
         boolean springActive = checkSpringEnabled(config, context, errors, warnings);
         checkAlwaysRequiredPrompts(config, context, errors, springActive);
@@ -49,6 +51,26 @@ public final class ConfigValidator {
         if (!Files.isRegularFile(modulePath.resolve("pom.xml"))) {
             errors.add(new ConfigViolation("project.modulePath",
                     "does not contain a pom.xml: " + rawModulePath));
+        }
+    }
+
+    private void checkDependencyInputs(
+            JTestForgeConfig config, ValidationContext context, List<ConfigViolation> errors) {
+        ProjectConfig project = config.project();
+        String treeFile = project.dependencyTreeFile();
+        if (treeFile != null && !treeFile.isBlank() && !Files.isReadable(resolveAgainstBase(context, treeFile))) {
+            errors.add(new ConfigViolation("project.dependencyTreeFile", "file not found or not readable: " + treeFile));
+        }
+        String localRepository = project.localRepository();
+        if (localRepository != null && !localRepository.isBlank()
+                && !Files.isDirectory(resolveAgainstBase(context, localRepository))) {
+            errors.add(new ConfigViolation("project.localRepository",
+                    "does not exist or is not a directory: " + localRepository));
+        }
+        String javaVersion = project.javaVersion();
+        if (javaVersion != null && !javaVersion.isBlank() && JavaRelease.parse(javaVersion) == 0) {
+            errors.add(new ConfigViolation("project.javaVersion",
+                    "is not a Java version: \"" + javaVersion + "\" (expected e.g. 8, 1.8, 11, 17)."));
         }
     }
 

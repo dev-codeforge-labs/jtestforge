@@ -92,13 +92,19 @@ class DefaultUnitProcessorTest {
         build = new FakeModuleBuild();
     }
 
+    /**
+     * The delta is only measured (jacoco:report only invoked) when requireCoverageGain is
+     * on - see {@link #withRequireCoverageGainOffByDefaultAZeroDeltaCandidateIsKeptAnyway()}
+     * for the default, where a real improvement would go unreported by design.
+     */
     @Test
-    void aCleanGenerationIsKeptAndReportsItsCoverageDelta() throws IOException {
+    void aCleanGenerationIsKeptAndReportsItsCoverageDeltaWhenRequireCoverageGainIsOn() throws IOException {
         provider.enqueueResponse(response("classify_aboveThreshold_returnsTwo",
                 "assertThat(subject.classify(500)).isEqualTo(2);"));
         build.compilesSuccessfully(1).scopedTestsPass().coverage(coverageWith(5));
+        GenerateConfig strict = new GenerateConfig(null, 2, true, null, null);
 
-        UnitOutcome outcome = processor().process(context());
+        UnitOutcome outcome = processor(SpringGenerationSupport.forNewRun(40), strict).process(context());
 
         assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
         assertThat(outcome.addedTests()).containsExactly("classify_aboveThreshold_returnsTwo");
@@ -122,6 +128,33 @@ class DefaultUnitProcessorTest {
         assertThat(provider.receivedPrompts()).hasSize(2);
         assertThat(provider.receivedPrompts().get(1)).contains("cannot find symbol");
         assertThat(Files.readString(testFile)).doesNotContain("firstAttempt");
+    }
+
+    /**
+     * A build that fails for a reason {@code CompilerErrorParser} does not recognise (an
+     * annotation processor, a plugin execution, anything that is not a plain javac
+     * diagnostic) must not leave the model with an empty "Compiler errors" section - it
+     * gets the raw build log instead, and that log is also kept on disk for a human.
+     */
+    @Test
+    void aCompileFailureTheParserCannotExplainStillGivesTheModelTheRawLog() throws IOException {
+        String rawLog = "Exit code: 1\n\n--- stdout ---\n[ERROR] some plugin blew up\n--- stderr ---\n";
+        provider.enqueueResponse(response("firstAttempt", "assertThat(subject.nope()).isEqualTo(2);"))
+                .enqueueResponse(response("repairedAttempt", "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.failsToCompileWithoutDiagnostics(rawLog)
+                .compilesSuccessfully(1)
+                .scopedTestsPass()
+                .coverage(coverageWith(5));
+
+        UnitOutcome outcome = processor().process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
+        assertThat(provider.receivedPrompts()).hasSize(2);
+        assertThat(provider.receivedPrompts().get(1)).contains("some plugin blew up");
+
+        Path buildLog = moduleDir.resolve("state").resolve("transcripts")
+                .resolve("com.acme.PaymentService#classify(int)@PLAIN_UNIT").resolve("compile-repair-0.build.log");
+        assertThat(Files.readString(buildLog)).isEqualTo(rawLog);
     }
 
     @Test
@@ -157,15 +190,116 @@ class DefaultUnitProcessorTest {
         assertThat(Files.readString(testFile)).isEqualTo(original);
     }
 
+    /**
+     * {@code requireCoverageGain} defaults to {@code false} - explicitly enabled here to
+     * pin the strict behaviour, which is no longer what a bare {@link #generateConfig()}
+     * exercises. See {@link #withRequireCoverageGainOffByDefaultAZeroDeltaCandidateIsKeptAnyway()}
+     * for the (now default) opposite.
+     */
     @Test
-    void zeroCoverageDeltaOnAPlainUnitDiscardsTheTestsAndRevertsTheFile() throws IOException {
+    void zeroCoverageDeltaOnAPlainUnitDiscardsTheTestsAndRevertsTheFileWhenRequireCoverageGainIsOn() throws IOException {
         String original = Files.readString(testFile);
         provider.enqueueResponse(response("coversNothingNew", "assertThat(subject.classify(500)).isEqualTo(2);"));
         build.compilesSuccessfully(1).scopedTestsPass().coverage(coverageWith(2));
+        GenerateConfig strict = new GenerateConfig(null, 2, true, null, null);
+
+        UnitOutcome outcome = processor(SpringGenerationSupport.forNewRun(40), strict).process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DISCARDED_NO_VALUE);
+        assertThat(Files.readString(testFile)).isEqualTo(original);
+    }
+
+    /**
+     * The new default: a candidate that compiles and passes is kept even though it moved
+     * no coverage - and, just as importantly, {@code jacoco:report} (here,
+     * {@code ModuleBuild.measureCoverage}) is never even called to find that out, so a
+     * broken JaCoCo setup on the target module cannot block this.
+     */
+    @Test
+    void withRequireCoverageGainOffByDefaultAZeroDeltaCandidateIsKeptAnyway() throws IOException {
+        provider.enqueueResponse(response("coversNothingNewButStillCompilesAndPasses",
+                "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedTestsPass();
 
         UnitOutcome outcome = processor().process(context());
 
-        assertThat(outcome.status()).isEqualTo(UnitStatus.DISCARDED_NO_VALUE);
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
+        assertThat(outcome.addedTests()).containsExactly("coversNothingNewButStillCompilesAndPasses");
+        assertThat(build.calls()).noneMatch(call -> call.startsWith("measureCoverage"));
+    }
+
+    @Test
+    void progressReportsCompileAndTestResultsButNeverFileContent() throws IOException {
+        List<String> progress = new java.util.ArrayList<>();
+        provider.enqueueResponse(response("classify_aboveThreshold_returnsTwo",
+                "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedTestsPass();
+
+        UnitOutcome outcome = processorWithProgress(generateConfig(), progress::add).process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("compile: OK"));
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("tests: PASSED"));
+        assertThat(progress).noneMatch(line -> line.contains("classify_aboveThreshold_returnsTwo"));
+    }
+
+    @Test
+    void progressReportsACompileFailureWithItsErrorCount() throws IOException {
+        List<String> progress = new java.util.ArrayList<>();
+        provider.enqueueResponse(response("firstAttempt", "assertThat(subject.nope()).isEqualTo(2);"))
+                .enqueueResponse(response("repairedAttempt", "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.failsToCompile("cannot find symbol: nope").compilesSuccessfully(1).scopedTestsPass();
+
+        processorWithProgress(generateConfig(), progress::add).process(context());
+
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("compile: FAILED"));
+    }
+
+    @Test
+    void progressReportsTheCoverageVerdictOnlyWhenRequireCoverageGainIsOn() throws IOException {
+        List<String> progress = new java.util.ArrayList<>();
+        provider.enqueueResponse(response("classify_aboveThreshold_returnsTwo",
+                "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedTestsPass().coverage(coverageWith(5));
+        GenerateConfig strict = new GenerateConfig(null, 2, true, null, null);
+
+        processorWithProgress(strict, progress::add).process(context());
+
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("coverage:"));
+    }
+
+    @Test
+    void progressDoesNotReportCoverageWhenRequireCoverageGainIsOff() throws IOException {
+        List<String> progress = new java.util.ArrayList<>();
+        provider.enqueueResponse(response("coversNothingNewButStillCompilesAndPasses",
+                "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedTestsPass();
+
+        processorWithProgress(generateConfig(), progress::add).process(context());
+
+        assertThat(progress).noneMatch(line -> line.contains("coverage:"));
+    }
+
+    /**
+     * A scoped run that fails without Surefire reporting a single result means the tests
+     * never ran - an old Surefire that cannot select {@code Class#method}, "No tests were
+     * executed", a plugin failure. The fix-assertion prompt would then show the model a
+     * "Failures" section reading "(none)", asking it to fix something it cannot see, at
+     * the cost of a full AI round trip per repair attempt.
+     */
+    @Test
+    void aScopedRunThatReportsNoResultAtAllIsNotSentBackToTheModelAsAnAssertionFailure() throws IOException {
+        String original = Files.readString(testFile);
+        provider.enqueueResponse(response("someTest", "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1)
+                .scopedRunNeverRan("[ERROR] No tests were executed!");
+
+        UnitOutcome outcome = processor().process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.FAILED_ASSERTION);
+        assertThat(outcome.error()).contains("no test result at all").contains("No tests were executed");
+        // The one that matters: the model was asked once, not once per repair round.
+        assertThat(provider.receivedPrompts()).hasSize(1);
         assertThat(Files.readString(testFile)).isEqualTo(original);
     }
 
@@ -339,6 +473,25 @@ class DefaultUnitProcessorTest {
                 config,
                 Duration.ofSeconds(30),
                 springSupport);
+    }
+
+    private DefaultUnitProcessor processorWithProgress(GenerateConfig config, java.util.function.Consumer<String> progress) {
+        var templates = new PromptTemplateLoader().loadBundled();
+        var assembler = new ContextAssembler(new ContextConfig(null, null, null, null, null, null, null));
+        return new DefaultUnitProcessor(
+                provider,
+                new TranscriptWriter(moduleDir.resolve("state")),
+                new UnitPromptFactory(templates, new PromptRenderer(200_000), assembler),
+                new ResponseParser(),
+                new StaticQualityGuards(config, springConfig()),
+                new TestClassMerger(),
+                new TestClassReverter(),
+                build,
+                new CoverageAndGapAcceptanceGate(build, new CoverageDeltaCalculator(), new ValueGate(config)),
+                config,
+                Duration.ofSeconds(30),
+                SpringGenerationSupport.forNewRun(40),
+                progress);
     }
 
     private DefaultUnitProcessor processorForMutation(FakeMutationRunner mutationRunner) {

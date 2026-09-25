@@ -1,6 +1,7 @@
 package com.devmanchego.jtestforge.build;
 
 import com.devmanchego.jtestforge.util.ExecutableResolver;
+import com.devmanchego.jtestforge.util.JavaHomeEnvironment;
 import com.devmanchego.jtestforge.util.ProcessRunner;
 import com.devmanchego.jtestforge.util.ProcessResult;
 
@@ -30,11 +31,19 @@ public final class MavenClasspathResolver {
     private final ProcessRunner processRunner;
     private final String mavenExecutable;
     private final List<String> mavenArgs;
+    private final Path javaHome;
 
     public MavenClasspathResolver(ProcessRunner processRunner, String mavenExecutable, List<String> mavenArgs) {
+        this(processRunner, mavenExecutable, mavenArgs, null);
+    }
+
+    /** @param javaHome exported to Maven via {@link JavaHomeEnvironment} when not null, as {@link MavenRunner} does */
+    public MavenClasspathResolver(ProcessRunner processRunner, String mavenExecutable, List<String> mavenArgs,
+                                  Path javaHome) {
         this.processRunner = Objects.requireNonNull(processRunner, "processRunner");
         this.mavenExecutable = Objects.requireNonNull(mavenExecutable, "mavenExecutable");
         this.mavenArgs = List.copyOf(mavenArgs);
+        this.javaHome = javaHome;
     }
 
     /**
@@ -52,7 +61,8 @@ public final class MavenClasspathResolver {
 
         try {
             List<String> command = buildCommand(outputFile);
-            ProcessResult result = processRunner.run(command, modulePath, Map.of(), null, timeout);
+            ProcessResult result = processRunner.run(
+                    command, modulePath, JavaHomeEnvironment.overridesFor(javaHome), null, timeout);
 
             if (result.timedOut()) {
                 throw new MavenClasspathResolutionException(

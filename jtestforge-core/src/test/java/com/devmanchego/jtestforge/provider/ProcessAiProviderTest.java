@@ -117,6 +117,53 @@ class ProcessAiProviderTest {
                 .isInstanceOf(ProviderException.class);
     }
 
+    /**
+     * The whole point of carrying {@link ProviderException.Diagnostics} rather than just a
+     * one-line message: a caller (here, {@code TranscriptWriter}) can persist the complete
+     * stdout/stderr of a failed CLI invocation, not a truncated first line of stderr.
+     */
+    @Test
+    void aFailedInvocationCarriesTheFullExitCodeAndBothStreams(@TempDir Path dir) throws Exception {
+        Script script = writeScript(dir,
+                "fail-with-output",
+                "[Console]::Out.Write('stdout line'); [Console]::Error.Write('stderr line'); exit 55",
+                "printf 'stdout line'; printf 'stderr line' >&2; exit 55");
+        ProcessAiProvider provider = provider(script, PromptDelivery.STDIN, 0);
+
+        ProviderException failure = catchProviderException(() -> provider.invoke("prompt", TIMEOUT));
+
+        ProviderException.Diagnostics diagnostics = failure.diagnostics().orElseThrow();
+        assertThat(diagnostics.exitCode()).isEqualTo(55);
+        assertThat(diagnostics.stdout()).contains("stdout line");
+        assertThat(diagnostics.stderr()).contains("stderr line");
+        assertThat(diagnostics.command()).contains(script.command());
+    }
+
+    @Test
+    void aTimedOutInvocationCarriesASentinelExitCodeRatherThanAMisleadingRealOne(@TempDir Path dir) throws Exception {
+        Script script = writeScript(dir, "hang",
+                "Start-Sleep -Seconds 30", "sleep 30");
+        ProcessAiProvider provider = provider(script, PromptDelivery.STDIN, 0);
+
+        ProviderException failure = catchProviderException(
+                () -> provider.invoke("prompt", Duration.ofMillis(200)));
+
+        assertThat(failure.diagnostics().orElseThrow().exitCode()).isEqualTo(Integer.MIN_VALUE);
+    }
+
+    private interface ThrowingCall {
+        void run() throws ProviderException;
+    }
+
+    private ProviderException catchProviderException(ThrowingCall call) {
+        try {
+            call.run();
+        } catch (ProviderException e) {
+            return e;
+        }
+        throw new AssertionError("Expected a ProviderException but none was thrown");
+    }
+
     @Test
     void emptyStdoutCountsAsATransportFailureNotAsAWellFormedEmptyAnswer(@TempDir Path dir) throws Exception {
         // A well-formed-but-useless answer is the response parser's problem (§12.2); an
@@ -141,6 +188,40 @@ class ProcessAiProviderTest {
         AiResponse response = provider.invoke("prompt", Duration.ofMillis(500));
 
         assertThat(response.content()).contains("fast");
+    }
+
+    /**
+     * A locked-down corporate machine routinely needs the CLI pointed somewhere it can
+     * actually write (GEMINI_CLI_HOME and friends). JTestForge does not interpret these -
+     * it only has to deliver them to the process.
+     */
+    @Test
+    void configuredEnvironmentVariablesReachTheCliProcess(@TempDir Path dir) throws Exception {
+        Script script = writeScript(dir, "echo-env",
+                "[Console]::Out.Write($env:JTESTFORGE_PROBE)",
+                "printf '%s' \"$JTESTFORGE_PROBE\"");
+        ProcessAiProvider provider = new ProcessAiProvider("test", new ProcessRunner(),
+                script.command(), script.args(), PromptDelivery.STDIN, 0,
+                dir, java.util.Map.of("JTESTFORGE_PROBE", "a-writable-home"));
+
+        AiResponse response = provider.invoke("prompt", Duration.ofSeconds(30));
+
+        assertThat(response.content()).contains("a-writable-home");
+    }
+
+    @Test
+    void stderrIsCarriedBackEvenWhenTheCallSucceeds(@TempDir Path dir) throws Exception {
+        // Where an agentic CLI reports retries, backoff and quota limits while exiting 0.
+        Script script = writeScript(dir, "chatty",
+                "[Console]::Error.WriteLine('429 retrying'); [Console]::Out.Write('the tests')",
+                "echo '429 retrying' >&2; printf 'the tests'");
+        ProcessAiProvider provider = new ProcessAiProvider("test", new ProcessRunner(),
+                script.command(), script.args(), PromptDelivery.STDIN, 0);
+
+        AiResponse response = provider.invoke("prompt", Duration.ofSeconds(30));
+
+        assertThat(response.content()).contains("the tests");
+        assertThat(response.stderr()).contains("429 retrying");
     }
 
     // --- fixtures --------------------------------------------------------------------

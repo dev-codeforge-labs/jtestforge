@@ -15,6 +15,7 @@ import com.github.javaparser.ast.expr.AnnotationExpr;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -47,7 +48,33 @@ public final class ResponseParser {
             "```([A-Za-z]*)\\r?\\n(.*?)```", Pattern.DOTALL);
     private static final Pattern UNCLOSED_JAVA_FENCE = Pattern.compile(
             "```java\\r?\\n(?!.*```)", Pattern.DOTALL);
+    /**
+     * A whole line, once trimmed, shaped like {@code @token\token} - found against a real
+     * agentic AI CLI: mid-generation, it narrates an intent to inspect the build (run
+     * Maven, check a Surefire report) and that intent leaks into the {@code java} block as
+     * a bogus "annotation" naming the report file it meant to look at, one copy pasted
+     * ahead of every test method. No legal Java construct is shaped like this - a real
+     * annotation's name is a dotted identifier, never containing a raw {@code \} - so a
+     * line matching this can only ever be exactly that kind of leaked artifact, never a
+     * false positive against real code. Excluding {@code (} and {@code "} is deliberate:
+     * it keeps this from ever touching a genuine one-line annotation with an argument.
+     */
+    private static final Pattern LEAKED_TOOL_NARRATION_LINE = Pattern.compile("^@[^\\s\"()]*\\\\[^\\s\"()]*$");
     private static final Set<String> TEST_ANNOTATIONS = Set.of("Test", "ParameterizedTest");
+    /**
+     * The one legal import for each recognised test annotation - jtestforge is JUnit 5
+     * only (rules.md says so unconditionally), so these are never ambiguous. Found against
+     * a real AI CLI whose target project also has JUnit 4 on its classpath (for its own
+     * pre-existing, un-migrated tests): it declared {@code org.junit.Test} instead of the
+     * JUnit 5 import. The test class already imports the JUnit 5 one - a class only ever
+     * has one {@code @Test} in its generation prompt (§6.1) - so nothing is lost by
+     * dropping the wrong import; keeping it instead would either fail to resolve (if the
+     * legacy JUnit is not a dependency) or collide outright with the existing JUnit 5
+     * import (if it is) - both are guaranteed, wasted compile failures.
+     */
+    private static final Map<String, String> CANONICAL_TEST_ANNOTATION_IMPORTS = Map.of(
+            "Test", "org.junit.jupiter.api.Test",
+            "ParameterizedTest", "org.junit.jupiter.params.ParameterizedTest");
     private static final Set<String> ALLOWED_WILDCARD_IMPORTS = Set.of(
             "org.mockito.Mockito.*", "org.assertj.core.api.Assertions.*", "org.junit.jupiter.api.Assertions.*");
 
@@ -60,6 +87,9 @@ public final class ResponseParser {
         }
 
         String javaBlock = extractFencedBlock(rawResponse, "java");
+        if (javaBlock != null) {
+            javaBlock = stripLeakedToolNarrationLines(javaBlock);
+        }
         if (javaBlock == null) {
             if (UNCLOSED_JAVA_FENCE.matcher(rawResponse).find()) {
                 return fatal(ContractViolationKind.NOT_FENCED,
@@ -166,6 +196,14 @@ public final class ResponseParser {
                 kept.add("static " + withoutStaticPrefix);
                 continue;
             }
+            String simpleName = importLine.substring(importLine.lastIndexOf('.') + 1);
+            String canonical = CANONICAL_TEST_ANNOTATION_IMPORTS.get(simpleName);
+            if (canonical != null && !importLine.equals(canonical)) {
+                dropped.add(new DroppedDeclaration(importLine,
+                        "not the JUnit 5 import for @" + simpleName + " - the test class already has "
+                                + canonical + "; keeping this one would fail to resolve or collide with it"));
+                continue;
+            }
             kept.add(importLine);
         }
         return kept;
@@ -211,6 +249,12 @@ public final class ResponseParser {
 
         throw new UnparseableException("the java block's content is not valid Java: "
                 + wrapped.getProblems().stream().findFirst().map(Object::toString).orElse("unknown syntax error"));
+    }
+
+    private String stripLeakedToolNarrationLines(String javaBlockContent) {
+        return javaBlockContent.lines()
+                .filter(line -> !LEAKED_TOOL_NARRATION_LINE.matcher(line.strip()).matches())
+                .collect(java.util.stream.Collectors.joining("\n"));
     }
 
     private boolean isTypeDeclaration(BodyDeclaration<?> declaration) {

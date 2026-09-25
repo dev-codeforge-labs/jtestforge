@@ -100,6 +100,41 @@ class ContextAssemblerTest {
         assertThat(uncovered).contains("if (amount.signum() < 0)");
     }
 
+    /**
+     * A method WorkUnitDiscovery selects purely for a missed branch has ZERO uncovered
+     * lines - {@code uncoveredLines} alone would render "_(none)_" and leave the model
+     * with no idea why it was even asked for a test.
+     */
+    @Test
+    void uncoveredBranchesCarryHowManyOutcomesWereTakenAndTheSourceText() {
+        ProductionClass paymentService = fixtureClass("com.acme.PaymentService");
+        ProductionMethod applyFee = method(paymentService, "applyFee");
+        int conditionLine = applyFee.startLine() + 1;
+        ClassCoverage coverage = new ClassCoverage("com.acme.PaymentService", 0, 0, 0, 0, 1, 1,
+                List.of(), Map.of(conditionLine, new LineStatus(0, 1, 1, 1)));
+
+        String branches = assembler.uncoveredBranches(paymentService, applyFee, coverage);
+
+        assertThat(branches).contains("line " + conditionLine)
+                .contains("1 of 2 branch outcomes taken")
+                .contains("if (amount.signum() < 0)");
+    }
+
+    @Test
+    void aLineWithNoPartialBranchIsNotListedAsOne() {
+        ProductionClass paymentService = fixtureClass("com.acme.PaymentService");
+        ProductionMethod applyFee = method(paymentService, "applyFee");
+        // Fully covered (both outcomes taken) and fully uncovered lines are each their
+        // own, different, concern - neither belongs in the partial-branch section.
+        ClassCoverage bothOutcomesTaken = new ClassCoverage("com.acme.PaymentService", 0, 0, 0, 0, 0, 2,
+                List.of(), Map.of(applyFee.startLine() + 1, new LineStatus(0, 1, 0, 2)));
+        ClassCoverage neverExecuted = new ClassCoverage("com.acme.PaymentService", 0, 0, 1, 0, 1, 0,
+                List.of(), Map.of(applyFee.startLine() + 1, new LineStatus(1, 0, 1, 0)));
+
+        assertThat(assembler.uncoveredBranches(paymentService, applyFee, bothOutcomesTaken)).isEqualTo("_(none)_");
+        assertThat(assembler.uncoveredBranches(paymentService, applyFee, neverExecuted)).isEqualTo("_(none)_");
+    }
+
     @Test
     void requestMappingsDescribeEachEndpointAndWhatItBinds() {
         String mappings = assembler.requestMappings(fixtureClass("com.acme.web.OrderController"));
@@ -140,6 +175,17 @@ class ContextAssemblerTest {
         assertThat(versions).contains("Hamcrest: not on the classpath");
         assertThat(versions).contains("`@ExtendWith(MockitoExtension.class)` is available");
         assertThat(versions).contains("static and final mocking (`mockStatic`) is NOT available");
+    }
+
+    @Test
+    void theJavaLevelIsStatedTogetherWithWhatThatLevelLacks() {
+        String java8 = assembler.frameworkVersions(TestFrameworkVersions.none().withJavaRelease(8));
+        String java21 = assembler.frameworkVersions(TestFrameworkVersions.none().withJavaRelease(21));
+        String unknown = assembler.frameworkVersions(TestFrameworkVersions.none());
+
+        assertThat(java8).contains("Java language level: `8`").contains("`var`").contains("`List.of`").contains("records");
+        assertThat(java21).contains("Java language level: `21`").doesNotContain("none of these exist");
+        assertThat(unknown).doesNotContain("Java language level");
     }
 
     @Test

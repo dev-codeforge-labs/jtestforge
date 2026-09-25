@@ -7,7 +7,6 @@ import com.devmanchego.jtestforge.config.ProjectConfig;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Map;
 
 /**
  * Locates and loads {@code jtestforge.yaml} — jtestforge-specification.md §5's resolution
@@ -34,9 +33,10 @@ final class ConfigResolver {
     }
 
     /**
-     * Loads the config at {@link #resolvePath}, applying {@code --module} as an override
-     * of {@code project.modulePath} - the override happens after loading, since it is a
-     * per-invocation choice, not part of the file's own content or its hash.
+     * Loads the config at {@link #resolvePath}, applying {@code --module},
+     * {@code --dependency-tree}, {@code --local-repository}, {@code --java-version} and
+     * {@code --java-home} as overrides of the {@code project} block - after loading, since
+     * they are per-invocation choices, not part of the file's own content or its hash.
      *
      * @throws com.devmanchego.jtestforge.config.ConfigLoadException if the file does not
      *         exist or cannot be parsed
@@ -44,11 +44,11 @@ final class ConfigResolver {
     static ConfigLoadResult load(CommonModuleOptions options) {
         Path path = resolvePath(options);
         ConfigLoadResult result = new ConfigLoader().load(path, System.getenv());
-        if (options.module == null) {
+        if (!options.overridesProject()) {
             return result;
         }
-        JTestForgeConfig withOverride = withModulePath(result.config(), options.module.toString());
-        return new ConfigLoadResult(withOverride, result.configHash(), result.sourceFile(), result.warnings());
+        JTestForgeConfig withOverrides = withProjectOverrides(result.config(), options);
+        return new ConfigLoadResult(withOverrides, result.configHash(), result.sourceFile(), result.warnings());
     }
 
     /** The module path a loaded config resolves to, as an absolute directory. */
@@ -56,11 +56,20 @@ final class ConfigResolver {
         return Path.of(config.project().modulePath()).toAbsolutePath().normalize();
     }
 
-    private static JTestForgeConfig withModulePath(JTestForgeConfig config, String modulePath) {
+    /** Relative paths on the command line are relative to the working directory, not the config file. */
+    private static JTestForgeConfig withProjectOverrides(JTestForgeConfig config, CommonModuleOptions options) {
         ProjectConfig project = config.project();
-        ProjectConfig overridden = new ProjectConfig(modulePath, project.mavenExecutable(), project.mavenArgs(),
-                project.javaHome(), project.testSourceRoot(), project.mainSourceRoot(),
-                project.testClassSuffix(), project.testClassSuffixByTier());
+        ProjectConfig overridden = new ProjectConfig(
+                options.module != null ? options.module.toString() : project.modulePath(),
+                project.mavenExecutable(), project.mavenArgs(),
+                options.javaHome != null ? options.javaHome.toAbsolutePath().toString() : project.javaHome(),
+                project.testSourceRoot(), project.mainSourceRoot(),
+                project.testClassSuffix(), project.testClassSuffixByTier(),
+                options.dependencyTree != null
+                        ? options.dependencyTree.toAbsolutePath().toString() : project.dependencyTreeFile(),
+                options.localRepository != null
+                        ? options.localRepository.toAbsolutePath().toString() : project.localRepository(),
+                options.javaVersion != null ? options.javaVersion : project.javaVersion());
         return new JTestForgeConfig(overridden, config.selection(), config.aiProvider(), config.prompts(),
                 config.spring(), config.context(), config.generate(), config.harden(), config.execution());
     }

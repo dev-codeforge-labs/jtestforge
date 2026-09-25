@@ -54,6 +54,164 @@ class ResponseParserTest {
         assertThat(result.dropped()).isEmpty();
     }
 
+    /**
+     * A real response from a target project that still has JUnit 4 on its classpath (for
+     * its own pre-existing, un-migrated tests): the model declared {@code org.junit.Test}
+     * instead of the JUnit 5 import jtestforge's own contract requires. Keeping it as
+     * written would either fail to resolve (JUnit 4 not a dependency) or collide with the
+     * JUnit 5 import the test class already has (it is) - a wasted compile failure either
+     * way, for an import the file never actually needed.
+     */
+    @Test
+    void aJUnit4TestImportIsDroppedInFavourOfTheJUnit5OneTheClassAlreadyHas() {
+        String response = """
+                ```imports
+                org.junit.Test
+                com.acme.model.enums.CategoryEnum
+                ```
+
+                ```java
+                @Test
+                void apply_typeTranche_createsSite() {
+                    assertEquals(1, 1);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).hasSize(1);
+        assertThat(result.candidates().get(0).requiredImports())
+                .containsExactly("com.acme.model.enums.CategoryEnum")
+                .doesNotContain("org.junit.Test");
+        assertThat(result.dropped()).extracting(DroppedDeclaration::description).contains("org.junit.Test");
+    }
+
+    @Test
+    void theCorrectJUnit5TestImportIsKeptWhenTheModelWritesItExplicitly() {
+        String response = """
+                ```imports
+                org.junit.jupiter.api.Test
+                ```
+
+                ```java
+                @Test
+                void aTest() {
+                    assertEquals(1, 1);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.candidates().get(0).requiredImports()).containsExactly("org.junit.jupiter.api.Test");
+        assertThat(result.dropped()).isEmpty();
+    }
+
+    /**
+     * A real response from a tool-capable (agentic) AI CLI: it narrates an intent to go
+     * inspect the build, then leaks a reference to the Surefire report it meant to check
+     * directly into the {@code java} block, shaped like a bogus annotation, once ahead of
+     * every method. Without stripping these, the whole response was a fatal
+     * {@code UNPARSEABLE_JAVA_BLOCK} - every one of these otherwise-valid test methods
+     * discarded over five identical, structurally-impossible-as-Java lines.
+     */
+    @Test
+    void aLeakedToolNarrationLineAheadOfEveryMethodIsStrippedRatherThanFailingTheWholeResponse() {
+        String response = """
+                Hi there this where you are :
+                C:\\work\\app
+                I will run the existing unit tests using Maven to ensure our starting baseline is passing.
+                I will set the `JAVA_HOME` environment variable to point to the JDK 8 installation.
+
+                ```imports
+                com.acme.model.enums.CategoryEnum
+                ```
+
+                ```java
+                 @target\\surefire-reports\\TEST-com.acme.utils.HelperUtilsTests.xml
+                @Test
+                public void apply_feeTempPresent_setsFeeTempId() {
+                    assertEquals(1, 1);
+                }
+
+                 @target\\surefire-reports\\TEST-com.acme.utils.HelperUtilsTests.xml
+                @Test
+                public void apply_statutCommandePresent_setsStatutCommande() {
+                    assertEquals(2, 2);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).extracting(TestCandidate::methodName)
+                .containsExactly("apply_feeTempPresent_setsFeeTempId", "apply_statutCommandePresent_setsStatutCommande");
+        assertThat(result.dropped()).isEmpty();
+    }
+
+    /**
+     * The literal real-world case, unmodified: the model's leaked line stood in the
+     * annotation slot instead of {@code @Test} - not alongside it. Stripping it cannot
+     * conjure the missing {@code @Test} back, so this response still ends up with zero
+     * usable candidates. The improvement is entirely in *why*: five clear
+     * "missing @Test" drops, each naming its method, replace one opaque
+     * {@code UNPARSEABLE_JAVA_BLOCK} that discarded the whole response with a JavaParser
+     * lexical-error message nobody could act on.
+     */
+    @Test
+    void whenTheLeakedLineReplacedTheAnnotationEntirelyEveryMethodIsClearlyDroppedNotFatallyRejected() {
+        String response = """
+                Hi there this where you are :
+                C:\\work\\app
+                I will run the existing unit tests using Maven to ensure our starting baseline is passing.
+
+                ```java
+                 @target\\surefire-reports\\TEST-com.acme.utils.HelperUtilsTests.xml
+                public void apply_feeTempPresent_setsFeeTempId() {
+                    assertEquals(1, 1);
+                }
+
+                 @target\\surefire-reports\\TEST-com.acme.utils.HelperUtilsTests.xml
+                public void apply_statutCommandePresent_setsStatutCommande() {
+                    assertEquals(2, 2);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).isEmpty();
+        assertThat(result.dropped()).extracting(DroppedDeclaration::reason)
+                .allMatch(reason -> reason.contains("missing @Test"));
+        assertThat(result.dropped()).hasSize(2);
+    }
+
+    @Test
+    void aGenuineOneLineAnnotationWithAStringArgumentContainingABackslashIsNeverStripped() {
+        // The stripping rule must never touch real code - excluding lines with `(` or `"`
+        // is what keeps a legitimate annotation argument safe even if it happens to
+        // contain a backslash, unlike the bare leaked-narration shape above.
+        String response = """
+                ```java
+                @DisplayName("uses C:\\\\data as the base path")
+                @Test
+                void windowsPathIsUsedAsIs() {
+                    assertEquals(1, 1);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).extracting(TestCandidate::methodName)
+                .containsExactly("windowsPathIsUsedAsIs");
+    }
+
     @Test
     void proseBeforeBetweenAndAfterTheFencedBlocksIsIgnored() {
         String response = """

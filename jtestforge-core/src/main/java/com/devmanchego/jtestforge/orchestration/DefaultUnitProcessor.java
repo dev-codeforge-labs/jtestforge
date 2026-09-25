@@ -64,6 +64,7 @@ public final class DefaultUnitProcessor implements UnitProcessor {
     private final GenerateConfig generateConfig;
     private final Duration providerTimeout;
     private final SpringGenerationSupport springSupport;
+    private final java.util.function.Consumer<String> progress;
 
     private final TestClassScanner testClassScanner = new TestClassScanner();
 
@@ -73,6 +74,24 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                          ModuleBuild moduleBuild, UnitAcceptanceGate acceptanceGate,
                          GenerateConfig generateConfig, Duration providerTimeout,
                          SpringGenerationSupport springSupport) {
+        this(aiProvider, transcriptWriter, promptFactory, responseParser, guards, merger, reverter,
+                moduleBuild, acceptanceGate, generateConfig, providerTimeout, springSupport, null);
+    }
+
+    /**
+     * @param progress receives one short, content-free line per compile check, per scoped
+     *                 test run, and (only when {@code generate.requireCoverageGain} is on)
+     *                 per coverage/gap verdict - on by default, so a long-running unit does
+     *                 not look stalled. AI-request/response progress is a separate concern,
+     *                 already covered by {@link TranscriptWriter}'s own progress sink.
+     */
+    public DefaultUnitProcessor(AiProvider aiProvider, TranscriptWriter transcriptWriter,
+                         UnitPromptFactory promptFactory, ResponseParser responseParser,
+                         StaticQualityGuards guards, TestClassMerger merger, TestClassReverter reverter,
+                         ModuleBuild moduleBuild, UnitAcceptanceGate acceptanceGate,
+                         GenerateConfig generateConfig, Duration providerTimeout,
+                         SpringGenerationSupport springSupport, java.util.function.Consumer<String> progress) {
+        this.progress = progress;
         this.aiProvider = Objects.requireNonNull(aiProvider, "aiProvider");
         this.transcriptWriter = Objects.requireNonNull(transcriptWriter, "transcriptWriter");
         this.promptFactory = Objects.requireNonNull(promptFactory, "promptFactory");
@@ -122,6 +141,9 @@ public final class DefaultUnitProcessor implements UnitProcessor {
             AttemptOutcome passing = repairUntilPassing(context, merged, discarded);
             if (passing instanceof EscalationFailed failed) {
                 return UnitOutcome.failed(UnitStatus.ESCALATION_REQUIRED, failed.reason(), discarded);
+            }
+            if (passing instanceof TestsNeverRan neverRan) {
+                return UnitOutcome.failed(UnitStatus.FAILED_ASSERTION, neverRan.reason(), discarded);
             }
             if (!(passing instanceof MergedCandidates passingMerged)) {
                 return UnitOutcome.failed(UnitStatus.FAILED_ASSERTION,
@@ -342,15 +364,20 @@ public final class DefaultUnitProcessor implements UnitProcessor {
 
         for (int repair = 0; repair <= generateConfig.maxRepairAttempts(); repair++) {
             CompileOutcome outcome = moduleBuild.compileTests();
+            reportProgress(outcome.compiled() ? "compile: OK"
+                    : "compile: FAILED (" + outcome.errors().size() + " error(s))");
             if (outcome.compiled()) {
                 return current;
             }
+            String unitId = context.unit().id().format();
+            transcriptWriter.recordBuildFailure(unitId, "compile-repair-" + repair, outcome.rawLog());
             if (repair == generateConfig.maxRepairAttempts()) {
                 break;
             }
             revert(context, current);
             AttemptOutcome repaired = generateAndMergeWithEscalation(context,
-                    promptFactory.fixCompilationPrompt(context, outcome.errors()), transcriptEpoch(context) + repair + 2, discarded);
+                    promptFactory.fixCompilationPrompt(context, errorsOrRawLogFallback(outcome)),
+                    transcriptEpoch(context) + repair + 2, discarded);
             if (repaired instanceof EscalationFailed) {
                 return repaired;
             }
@@ -361,6 +388,22 @@ public final class DefaultUnitProcessor implements UnitProcessor {
         }
         revert(context, current);
         return new NoCandidates();
+    }
+
+    /**
+     * {@code CompilerErrorParser} only recognises javac's own diagnostic shape; a build
+     * that fails for any other reason (an annotation processor, a plugin execution, a
+     * dependency it cannot resolve) leaves {@code outcome.errors()} empty even though the
+     * build genuinely failed. Sending the model an empty "Compiler errors" section in that
+     * case asks it to fix something it cannot see - the one raw-log line the parser missed
+     * is exactly what it needs instead.
+     */
+    private List<com.devmanchego.jtestforge.model.CompilerError> errorsOrRawLogFallback(CompileOutcome outcome) {
+        if (!outcome.errors().isEmpty()) {
+            return outcome.errors();
+        }
+        return List.of(new com.devmanchego.jtestforge.model.CompilerError(
+                "(build failure not matched by any known javac diagnostic pattern)", 0, 0, outcome.rawLog()));
     }
 
     // --- step 8 -----------------------------------------------------------------------
@@ -374,8 +417,26 @@ public final class DefaultUnitProcessor implements UnitProcessor {
             TestRunOutcome outcome = moduleBuild.runScopedTests(
                     context.testClassSimpleName(), current.addedTestNames());
             if (outcome.allPassed()) {
+                reportProgress("tests: PASSED");
                 return current;
             }
+            if (outcome.buildFailedBeforeTests()) {
+                // The run failed without Surefire reporting a single result, so the tests
+                // never actually ran - an old Surefire that does not understand
+                // -Dtest=Class#method selection, "No tests were executed", a plugin that
+                // blew up. There is no assertion to fix and nothing to show the model:
+                // the fix-assertion prompt's "Failures" section would read "(none)",
+                // asking it to fix something it cannot see (the same trap
+                // errorsOrRawLogFallback avoids on the compile side). Retrying would only
+                // reproduce it, so the unit stops here with the build's own words.
+                reportProgress("tests: NOT RUN (Surefire reported no result at all)");
+                transcriptWriter.recordBuildFailure(context.unit().id().format(),
+                        "scoped-run-" + repair, outcome.buildLog());
+                revert(context, current);
+                return new TestsNeverRan("the scoped test run produced no test result at all: "
+                        + outcome.buildFailureSummary().get(0));
+            }
+            reportProgress("tests: FAILED");
             if (repair == generateConfig.maxRepairAttempts()) {
                 break;
             }
@@ -391,7 +452,10 @@ public final class DefaultUnitProcessor implements UnitProcessor {
             current = repairedMerged;
             // A repaired batch has to compile again before it can be re-run: the model
             // may have introduced a fresh compilation error while fixing the assertion.
-            if (!moduleBuild.compileTests().compiled()) {
+            CompileOutcome recompiled = moduleBuild.compileTests();
+            if (!recompiled.compiled()) {
+                transcriptWriter.recordBuildFailure(
+                        context.unit().id().format(), "assertion-repair-" + repair + "-compile", recompiled.rawLog());
                 revert(context, current);
                 return new NoCandidates();
             }
@@ -423,6 +487,9 @@ public final class DefaultUnitProcessor implements UnitProcessor {
 
     private UnitOutcome applyAcceptanceGate(UnitContext context, MergedCandidates merged, List<String> discarded) {
         AcceptanceVerdict verdict = acceptanceGate.evaluate(context, merged);
+        if (generateConfig.requireCoverageGain()) {
+            reportProgress("coverage: " + verdict.reason());
+        }
         if (!verdict.keep()) {
             revert(context, merged);
             return UnitOutcome.failed(UnitStatus.DISCARDED_NO_VALUE, verdict.reason(), discarded);
@@ -434,6 +501,13 @@ public final class DefaultUnitProcessor implements UnitProcessor {
 
     private void revert(UnitContext context, MergedCandidates merged) {
         reverter.revert(context.testFile(), merged.addedTestNames(), merged.addedImports());
+    }
+
+    /** One short, content-free progress line - see the {@code progress} constructor parameter. */
+    private void reportProgress(String message) {
+        if (progress != null) {
+            progress.accept("  " + message);
+        }
     }
 
     /**
@@ -487,6 +561,14 @@ public final class DefaultUnitProcessor implements UnitProcessor {
     }
 
     /** No candidate survived response parsing, the static guards, or the merge. */
+    /**
+     * The scoped run failed without producing any Surefire result, so the tests never ran
+     * and no assertion can be blamed - distinct from "they ran and failed", which is what
+     * {@code FAILED_ASSERTION}'s usual message describes.
+     */
+    private record TestsNeverRan(String reason) implements AttemptOutcome {
+    }
+
     private record NoCandidates() implements AttemptOutcome {
     }
 

@@ -60,7 +60,11 @@ These apply to every subcommand documented below (`init`, `scan`, `status`, `cle
 |---|---|
 | `-c, --config <path>` | Path to the config file. Default: `./jtestforge.yaml`. |
 | `-m, --module <path>` | Overrides `project.modulePath` from the config for this invocation. |
-| `-v, --verbose` | Enables debug logging. |
+| `-v, --verbose` | Enables debug logging. Echoes every external command (`mvn ...`, the AI provider CLI) to the console as it runs, with its exit code once it finishes. On `generate`, also echoes every AI provider request and response - or, on failure, the full stdout/stderr - as it happens. |
+| `--dependency-tree <file>` | `scan`/`generate`: read dependencies from a saved `mvn dependency:tree` instead of running Maven. Overrides `project.dependencyTreeFile`. |
+| `--local-repository <dir>` | Local Maven repository holding that tree's jars. Overrides `project.localRepository`. |
+| `--java-version <n>` | Java release of the module's code (`8`, `1.8`, `11`...). Overrides `project.javaVersion`. |
+| `--java-home <dir>` | JDK every Maven call runs on, exported as `JAVA_HOME`. Overrides `project.javaHome`. |
 
 **Config file resolution order** (`--config` beats both):
 1. `--config <path>`, if given.
@@ -97,7 +101,9 @@ The cheap, read-only dry run. Analyzes the target module's source with the same 
 scanner and symbol solver a real generation run would use, classifies every eligible
 method into a Spring test tier, and detects framework-semantic gaps — with **no coverage
 measurement, no AI call, no file write, and no Spring context load**. The one process it
-does start is `mvn dependency:build-classpath`, needed for accurate type resolution.
+does start is `mvn dependency:build-classpath`, needed for accurate type resolution —
+and with `project.dependencyTreeFile` (or `--dependency-tree`) it starts none; see
+[Modules Maven can't resolve, and older Java](#modules-maven-cant-resolve-and-older-java).
 
 ```bash
 java -jar jtestforge.jar scan
@@ -193,6 +199,21 @@ Run 8f2c1e40-...: COMPLETED
 `PENDING` units are ones a `--tier`/`--no-spring` restriction left untouched this run —
 still there, unchanged, for a future unrestricted invocation.
 
+#### Diagnosing an AI provider failure (`PROVIDER_ERROR`)
+
+`state.json`'s `lastError` is one line, sometimes with the process's own error message
+truncated or mangled by console encoding (`sintaxis no v�lida` for a Spanish Windows
+`cmd.exe`, say). Two ways to get the full picture instead:
+
+- **Every attempt, always** — `<stateDir>/transcripts/<unitId>/<attempt>.prompt.md` has
+  exactly what was sent; `<attempt>.response.md` has exactly what came back. On a failed
+  attempt this is not the model's answer but the complete diagnostic dump: the resolved
+  command, the exit code (or "(timed out)"), and the full stdout and stderr the process
+  produced — not just the first line.
+- **Live, as it happens** — add `-v`/`--verbose` to `generate` to also print every
+  request and response (or failure diagnostics) to the console immediately, without
+  waiting for the run to finish or digging through `transcripts/`.
+
 ### `jtestforge report`
 
 Renders the last run's `.jtestforge/state.json` — never a second source of truth
@@ -252,6 +273,10 @@ project:
   modulePath: .                    # the Maven module JTestForge operates on
   mavenExecutable: mvn
   mavenArgs: ["-o", "-B"]
+  # javaHome: C:/jdk8               # JDK every Maven call runs on (exported as JAVA_HOME)
+  # javaVersion: 8                  # Java level of the code; default: detected
+  # dependencyTreeFile: deps-tree.txt  # saved mvn dependency:tree; no Maven call for dependencies
+  # localRepository: C:/m2/repo     # where that tree's jars live; default: from settings.xml
   testSourceRoot: src/test/java
   mainSourceRoot: src/main/java
   testClassSuffix: Test             # Foo -> FooTest
@@ -298,6 +323,57 @@ expects.
 
 See `jtestforge-specification.md` §5 for the full config reference and validation rules,
 and §14 for the complete command/exit-code specification this CLI is built against.
+
+---
+
+## Modules Maven can't resolve, and older Java
+
+### `dependencyTreeFile`: no Maven call for dependencies
+
+`scan` and `generate` normally ask Maven for the module's classpath
+(`mvn dependency:build-classpath`) and dependency list (`mvn dependency:list`). Where that
+fails — a plugin prefix the mirror can't resolve offline, a sibling module that was never
+installed — give JTestForge a saved `mvn dependency:tree` instead. `scan` then starts no
+process at all, and `generate` only runs Maven for the actual builds.
+
+One file can describe the **whole** application: each module's block is found by its own
+`groupId:artifactId`. Create it once from the reactor root:
+
+```bash
+mvn test-compile dependency:tree -DoutputFile=C:/tmp/deps-tree.txt -DappendOutput=true
+```
+
+- `test-compile` lets the reactor resolve sibling modules from their `target/classes`
+  without `mvn install`; leave it out if everything is already installed.
+- `-DoutputFile` must be absolute, otherwise each module writes a file of its own.
+- A redirected console log (`mvn dependency:tree > deps-tree.txt`) is accepted too.
+- If Maven says `No plugin found for prefix 'dependency'`, name the plugin in full:
+  `org.apache.maven.plugins:maven-dependency-plugin:<a version in your repository>:tree`.
+
+Then set `project.dependencyTreeFile` (relative to the config file) or pass
+`--dependency-tree`. Jars are looked up in the local repository: `project.localRepository`
+/ `--local-repository`, else detected the way Maven does it (`-Dmaven.repo.local` in
+`mavenArgs`, `~/.m2/settings.xml`, the Maven installation's `conf/settings.xml`,
+`~/.m2/repository`). A dependency on a sibling module resolves to its `target/classes`.
+Anything not on disk is listed as a warning and skipped — its types resolve by name
+only, and the run carries on.
+
+### Java version of the target code
+
+JTestForge works out which Java release the module is written for and prints it: the
+compiler plugin's `<release>`/`<source>`/`<target>`, or the `maven.compiler.*` /
+`java.version` properties, following parent poms (on disk, else in the local repository);
+failing that, the class-file version of `target/classes` or of the module's jar in
+`target/`. `project.javaVersion` / `--java-version` (`8` or `1.8` alike) overrides it.
+The release is used to:
+
+- parse the sources at that language level, so old code newer levels reject (such as `_`
+  as an identifier) still scans; a file that fails is retried at Java 21;
+- tell the model which language features and JDK APIs don't exist at that level, so a
+  Java 8 module doesn't get tests using `var`, `List.of` or records.
+
+The JDK Maven itself runs on is `project.javaHome`, exported as `JAVA_HOME` to every Maven
+call JTestForge makes; a warning is printed when that JDK is older than the module's level.
 
 ---
 

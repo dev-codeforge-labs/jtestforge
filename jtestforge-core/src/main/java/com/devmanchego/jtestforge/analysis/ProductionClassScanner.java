@@ -51,11 +51,26 @@ import java.util.stream.Stream;
 public final class ProductionClassScanner {
 
     private final JavaParser javaParser;
+    private final JavaParser fallbackParser;
     private final Path mainSourceRoot;
 
     public ProductionClassScanner(TypeSolver typeSolver, Path mainSourceRoot) {
+        this(typeSolver, mainSourceRoot, 0);
+    }
+
+    /**
+     * @param javaRelease the release the module is written for, 0 if unknown. Parsing at
+     *                    that level accepts old code newer levels reject (e.g. {@code _} as
+     *                    an identifier); a file that fails is retried at Java 21, so a
+     *                    wrongly detected release cannot fail a scan that used to pass.
+     */
+    public ProductionClassScanner(TypeSolver typeSolver, Path mainSourceRoot, int javaRelease) {
         this.mainSourceRoot = mainSourceRoot;
-        this.javaParser = new JavaParser(parserConfiguration(typeSolver));
+        ParserConfiguration.LanguageLevel level = JavaLanguageLevels.forRelease(javaRelease);
+        this.javaParser = new JavaParser(parserConfiguration(typeSolver, level));
+        this.fallbackParser = level == ParserConfiguration.LanguageLevel.JAVA_21
+                ? null
+                : new JavaParser(parserConfiguration(typeSolver, ParserConfiguration.LanguageLevel.JAVA_21));
     }
 
     /**
@@ -65,8 +80,13 @@ public final class ProductionClassScanner {
      * failure on a module that compiles perfectly well.
      */
     public static ParserConfiguration parserConfiguration(TypeSolver typeSolver) {
+        return parserConfiguration(typeSolver, ParserConfiguration.LanguageLevel.JAVA_21);
+    }
+
+    public static ParserConfiguration parserConfiguration(
+            TypeSolver typeSolver, ParserConfiguration.LanguageLevel languageLevel) {
         return new ParserConfiguration()
-                .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21)
+                .setLanguageLevel(languageLevel)
                 .setSymbolResolver(new JavaSymbolSolver(typeSolver));
     }
 
@@ -107,19 +127,32 @@ public final class ProductionClassScanner {
     }
 
     private CompilationUnit parse(Path sourceFile) {
-        ParseResult<CompilationUnit> result;
-        try {
-            result = javaParser.parse(sourceFile);
-        } catch (IOException e) {
-            throw new ProductionScanException(sourceFile, e.getMessage());
+        ParseResult<CompilationUnit> result = parseWith(javaParser, sourceFile);
+        if (!isUsable(result) && fallbackParser != null) {
+            ParseResult<CompilationUnit> fallback = parseWith(fallbackParser, sourceFile);
+            if (isUsable(fallback)) {
+                return fallback.getResult().get();
+            }
         }
-        if (!result.isSuccessful() || result.getResult().isEmpty()) {
+        if (!isUsable(result)) {
             String problems = result.getProblems().stream()
                     .map(Problem::getVerboseMessage)
                     .collect(Collectors.joining("; "));
             throw new ProductionScanException(sourceFile, problems);
         }
         return result.getResult().get();
+    }
+
+    private static ParseResult<CompilationUnit> parseWith(JavaParser parser, Path sourceFile) {
+        try {
+            return parser.parse(sourceFile);
+        } catch (IOException e) {
+            throw new ProductionScanException(sourceFile, e.getMessage());
+        }
+    }
+
+    private static boolean isUsable(ParseResult<CompilationUnit> result) {
+        return result.isSuccessful() && result.getResult().isPresent();
     }
 
     private List<ClassOrInterfaceDeclaration> concreteTopLevelAndNestedClasses(CompilationUnit compilationUnit) {

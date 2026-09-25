@@ -12,6 +12,12 @@ import java.util.Map;
  *
  * <p>{@code modulePath} has no default: it is the one required field in this block, and
  * its absence is reported by {@link ConfigValidator} rather than silently tolerated.
+ *
+ * @param dependencyTreeFile saved {@code mvn dependency:tree} output (may cover the whole
+ *                           reactor) used instead of running Maven to resolve dependencies;
+ *                           relative to the config file
+ * @param localRepository    where that tree's jars live; detected from Maven's settings when null
+ * @param javaVersion        Java release of the target code (8, 1.8, 11...); detected when null
  */
 public record ProjectConfig(
         String modulePath,
@@ -21,7 +27,10 @@ public record ProjectConfig(
         String testSourceRoot,
         String mainSourceRoot,
         String testClassSuffix,
-        Map<Tier, String> testClassSuffixByTier) {
+        Map<Tier, String> testClassSuffixByTier,
+        String dependencyTreeFile,
+        String localRepository,
+        String javaVersion) {
 
     private static final Map<Tier, String> DEFAULT_SUFFIX_BY_TIER = defaultSuffixByTier();
 

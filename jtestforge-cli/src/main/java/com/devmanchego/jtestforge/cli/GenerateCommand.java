@@ -129,9 +129,25 @@ public final class GenerateCommand implements Callable<Integer> {
     private Integer runLocked(ConsoleOutput console, JTestForgeConfig config, Path modulePath, Path stateDir,
                               String configHash, String providerId, ProviderConfig providerConfig, LockFile lock) {
         Path configBaseDir = ConfigResolver.resolvePath(options).toAbsolutePath().getParent();
-        GenerateRunner runner = new GenerateRunner(config, modulePath, stateDir, configBaseDir, configHash);
+        java.util.function.Consumer<String> verboseSink = options.verbose ? console::info : null;
+        java.util.function.Consumer<String> progress = console::info;
+        GenerateRunner runner = new GenerateRunner(
+                config, modulePath, stateDir, configBaseDir, configHash, verboseSink, progress);
 
-        var springFacts = runner.detectSpringFacts();
+        com.devmanchego.jtestforge.model.SpringStackFacts springFacts;
+        try {
+            springFacts = runner.detectSpringFacts();
+        } catch (com.devmanchego.jtestforge.build.MavenClasspathResolutionException
+                 | com.devmanchego.jtestforge.build.DependencyTreeException e) {
+            runner.moduleResolution().report(console);
+            console.error(e.getMessage());
+            return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
+        }
+        runner.moduleResolution().report(console);
+        Integer frameworkError = checkTestFrameworkPreflight(console, runner);
+        if (frameworkError != null) {
+            return frameworkError;
+        }
         ValidationContext validationContext = new ValidationContext(
                 configBaseDir, com.devmanchego.jtestforge.util.ExecutableResolver.systemPathDirectories(),
                 springFacts.springTestPresent(), false);
@@ -148,10 +164,23 @@ public final class GenerateCommand implements Callable<Integer> {
 
         Thread hook = new InterruptHandler(runner.stateStore(), lock, new TestClassReverter(), modulePath).install();
         try {
-            List<DiscoveredUnit> discovered = runner.discoverUnits();
-            AiProvider provider = new ProcessAiProvider(providerId, new com.devmanchego.jtestforge.util.ProcessRunner(),
+            List<DiscoveredUnit> discovered;
+            try {
+                discovered = runner.discoverUnits();
+            } catch (com.devmanchego.jtestforge.build.MavenClasspathResolutionException
+                     | com.devmanchego.jtestforge.build.DependencyTreeException e) {
+                runner.moduleResolution().report(console);
+                console.error(e.getMessage());
+                return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
+            }
+            runner.moduleResolution().report(console);
+            AiProvider provider = new ProcessAiProvider(providerId,
+                    new com.devmanchego.jtestforge.util.ProcessRunner(
+                            java.nio.charset.Charset.defaultCharset(), verboseSink, progress),
                     providerConfig.command(), providerConfig.args(), providerConfig.promptDelivery(),
-                    providerConfig.transportRetries(), modulePath);
+                    providerConfig.transportRetries(),
+                    providerWorkingDirectory(console, config, modulePath, stateDir),
+                    providerConfig.env());
             Duration providerTimeout = Duration.ofSeconds(providerConfig.timeoutSeconds());
             TierRestriction restriction = tierRestriction();
 
@@ -162,6 +191,29 @@ public final class GenerateCommand implements Callable<Integer> {
             return ExitCodeMapper.forGenerate(result);
         } finally {
             new InterruptHandler(runner.stateStore(), lock, new TestClassReverter(), modulePath).uninstall(hook);
+        }
+    }
+
+    /**
+     * Falls back to the module path rather than failing the run: a scratch directory that
+     * cannot be created is a reason to be slower, never a reason to generate nothing.
+     */
+    private Path providerWorkingDirectory(ConsoleOutput console, JTestForgeConfig config,
+                                          Path modulePath, Path stateDir) {
+        boolean isolate = config.aiProvider().isolateWorkingDirectory();
+        try {
+            Path resolved = com.devmanchego.jtestforge.provider.ProviderWorkingDirectory.resolve(
+                    isolate, modulePath, stateDir);
+            if (isolate) {
+                console.info("AI CLI runs in an empty directory (" + resolved
+                        + ") so an agentic provider has no workspace to explore"
+                        + " - set aiProvider.isolateWorkingDirectory: false to use the module instead.");
+            }
+            return resolved;
+        } catch (java.io.IOException e) {
+            console.warn("Could not create the isolated AI working directory under " + stateDir
+                    + " (" + e.getMessage() + "); falling back to the module directory.");
+            return modulePath;
         }
     }
 
@@ -180,8 +232,30 @@ public final class GenerateCommand implements Callable<Integer> {
         var counts = result.state().statusCounts();
         counts.forEach((status, count) -> console.info("  " + status + ": " + count));
         if (!result.fullSuiteFailures().isEmpty()) {
-            console.error("Full suite failures at the end of the run: " + result.fullSuiteFailures());
+            console.error(result.exitReason() == GenerateResult.ExitReason.PREFLIGHT_FAILED
+                    ? "The module was not usable before the run started - nothing was generated:"
+                    : "The module's full suite is failing at the end of the run:");
+            result.fullSuiteFailures().forEach(failure -> console.error("  " + failure));
         }
+    }
+
+    /**
+     * JTestForge generates JUnit 5 and only JUnit 5: the skeleton it creates for a new test
+     * class imports {@code org.junit.jupiter.api.Test}, and the response contract requires
+     * {@code @Test} methods. On a module without Jupiter on its test classpath, every
+     * single generated class therefore fails to compile for a reason the model cannot fix,
+     * however many repair rounds it is given - so this is refused up front rather than
+     * discovered one expensive AI call at a time.
+     */
+    private Integer checkTestFrameworkPreflight(ConsoleOutput console, GenerateRunner runner) {
+        var frameworks = runner.frameworkVersions();
+        if (frameworks == null || frameworks.junitJupiter() != null) {
+            return null;
+        }
+        console.error("This module has no JUnit Jupiter (JUnit 5) on its test classpath, and JTestForge"
+                + " generates JUnit 5 tests - every generated class would fail to compile.");
+        console.error("  Add junit-jupiter to the module's test scope, then run again.");
+        return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
     }
 
     private Integer checkModulePreflight(ConsoleOutput console, JTestForgeConfig config, Path modulePath) {

@@ -34,6 +34,7 @@ public final class ProcessAiProvider implements AiProvider {
     private final PromptDelivery promptDelivery;
     private final int transportRetries;
     private final Path workingDirectory;
+    private final Map<String, String> environment;
 
     /** Runs the CLI with the JVM's own current directory as its working directory. */
     public ProcessAiProvider(String id, ProcessRunner processRunner, String command,
@@ -51,6 +52,19 @@ public final class ProcessAiProvider implements AiProvider {
     public ProcessAiProvider(String id, ProcessRunner processRunner, String command,
                               List<String> args, PromptDelivery promptDelivery, int transportRetries,
                               Path workingDirectory) {
+        this(id, processRunner, command, args, promptDelivery, transportRetries, workingDirectory, Map.of());
+    }
+
+    /**
+     * @param environment variables merged on top of the inherited environment for this CLI
+     *                    only - {@code aiProvider.providers.*.env}. JTestForge stays
+     *                    agnostic about what they mean; a corporate setup routinely needs
+     *                    some (a writable config directory, a proxy, a debug switch).
+     */
+    public ProcessAiProvider(String id, ProcessRunner processRunner, String command,
+                              List<String> args, PromptDelivery promptDelivery, int transportRetries,
+                              Path workingDirectory, Map<String, String> environment) {
+        this.environment = Map.copyOf(Objects.requireNonNull(environment, "environment"));
         this.id = Objects.requireNonNull(id, "id");
         this.processRunner = Objects.requireNonNull(processRunner, "processRunner");
         this.command = Objects.requireNonNull(command, "command");
@@ -88,15 +102,18 @@ public final class ProcessAiProvider implements AiProvider {
                     command.add(promptFile.toString());
                 }
 
-                ProcessResult result = processRunner.run(command, workingDirectory, Map.of(), stdin, timeout);
+                ProcessResult result = processRunner.run(command, workingDirectory, environment, stdin, timeout);
 
                 String failureReason = transportFailureReason(result);
                 if (failureReason == null) {
-                    return new AiResponse(result.stdout(), elapsedMillis(startNanos));
+                    return new AiResponse(result.stdout(), elapsedMillis(startNanos), result.stderr());
                 }
                 lastFailure = new ProviderException(
                         "\"" + id + "\" attempt " + (attempt + 1) + "/" + (transportRetries + 1)
-                                + " failed: " + failureReason);
+                                + " failed: " + failureReason,
+                        new ProviderException.Diagnostics(String.join(" ", command),
+                                result.timedOut() ? Integer.MIN_VALUE : result.exitCode(),
+                                result.stdout(), result.stderr()));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new ProviderException("Interrupted while invoking \"" + id + "\"", e);

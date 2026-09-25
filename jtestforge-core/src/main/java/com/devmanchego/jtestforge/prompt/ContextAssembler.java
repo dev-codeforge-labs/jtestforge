@@ -114,20 +114,53 @@ public final class ContextAssembler {
                 .collect(Collectors.joining("\n"));
     }
 
+    /**
+     * The Java level is stated even when framework versions are switched off: a test using
+     * a newer language feature or JDK API than the module compiles at can never compile.
+     */
     public String frameworkVersions(TestFrameworkVersions versions) {
-        if (!config.includeDetectedFrameworkVersions()) {
-            return NOTHING;
-        }
         List<String> lines = new ArrayList<>();
-        addIfPresent(lines, "JUnit Jupiter", versions.junitJupiter());
-        addIfPresent(lines, "Mockito", versions.mockito());
-        addIfPresent(lines, "AssertJ", versions.assertJ());
-        addIfPresent(lines, "Hamcrest", versions.hamcrest());
-        lines.add("- `@ExtendWith(MockitoExtension.class)` is "
-                + (versions.mockitoJUnitJupiterPresent() ? "available" : "NOT available"));
-        lines.add("- static and final mocking (`mockStatic`) is "
-                + (versions.mockitoInlinePresent() ? "available" : "NOT available"));
-        return String.join("\n", lines);
+        if (versions.javaRelease() > 0) {
+            lines.add(javaLanguageLevel(versions.javaRelease()));
+        }
+        if (config.includeDetectedFrameworkVersions()) {
+            addIfPresent(lines, "JUnit Jupiter", versions.junitJupiter());
+            addIfPresent(lines, "Mockito", versions.mockito());
+            addIfPresent(lines, "AssertJ", versions.assertJ());
+            addIfPresent(lines, "Hamcrest", versions.hamcrest());
+            lines.add("- `@ExtendWith(MockitoExtension.class)` is "
+                    + (versions.mockitoJUnitJupiterPresent() ? "available" : "NOT available"));
+            lines.add("- static and final mocking (`mockStatic`) is "
+                    + (versions.mockitoInlinePresent() ? "available" : "NOT available"));
+        }
+        return lines.isEmpty() ? NOTHING : String.join("\n", lines);
+    }
+
+    private String javaLanguageLevel(int release) {
+        List<String> unavailable = new ArrayList<>();
+        if (release < 9) {
+            unavailable.add("`List.of`/`Set.of`/`Map.of`");
+        }
+        if (release < 10) {
+            unavailable.add("`var`");
+        }
+        if (release < 11) {
+            unavailable.add("`String.isBlank`/`strip`/`lines`/`repeat`, `Optional.isEmpty`");
+        }
+        if (release < 14) {
+            unavailable.add("switch expressions (`case X ->`)");
+        }
+        if (release < 15) {
+            unavailable.add("text blocks");
+        }
+        if (release < 16) {
+            unavailable.add("records, `instanceof` patterns, `Stream.toList()`");
+        }
+        if (release < 21) {
+            unavailable.add("`switch` patterns, `getFirst()`/`getLast()` on lists");
+        }
+        String line = "- Java language level: `" + release + "` - the tests are compiled at this level";
+        return unavailable.isEmpty() ? line : line + ", so none of these exist: " + String.join("; ", unavailable);
     }
 
     private void addIfPresent(List<String> lines, String label, Object version) {
@@ -142,17 +175,44 @@ public final class ContextAssembler {
     public String uncoveredLines(
             ProductionClass productionClass, ProductionMethod method, ClassCoverage coverage) {
         List<Integer> uncovered = coverage.uncoveredLineNumbers(method.startLine(), method.endLine());
-        if (uncovered.isEmpty()) {
+        return renderAnnotatedLines(productionClass, uncovered, lineNumber -> "");
+    }
+
+    /**
+     * Lines that executed but took only one of two-or-more branch outcomes - a condition
+     * whose {@code if} arm ran but whose {@code else} never did, or the reverse.
+     *
+     * <p>{@code WorkUnitDiscovery} selects a method with zero uncovered lines but a missed
+     * branch just as readily as one with genuinely dead code (a fully-covered method can
+     * still have an untaken branch on an otherwise-executed line). Without this, that case
+     * renders {@code {{UNCOVERED_LINES}}} as empty and gives the model nothing to act on
+     * at all, even though {@code WorkUnitDiscovery} had a concrete reason to ask for a test.
+     */
+    public String uncoveredBranches(
+            ProductionClass productionClass, ProductionMethod method, ClassCoverage coverage) {
+        List<Integer> partial = coverage.partiallyCoveredBranchLineNumbers(method.startLine(), method.endLine());
+        return renderAnnotatedLines(productionClass, partial, lineNumber -> {
+            var status = coverage.lines().get(lineNumber);
+            return " (" + status.coveredBranches() + " of "
+                    + (status.coveredBranches() + status.missedBranches()) + " branch outcomes taken)";
+        });
+    }
+
+    private String renderAnnotatedLines(
+            ProductionClass productionClass, List<Integer> lineNumbers, java.util.function.IntFunction<String> annotation) {
+        if (lineNumbers.isEmpty()) {
             return NOTHING;
         }
         List<String> sourceLines;
         try {
             sourceLines = Files.readAllLines(productionClass.sourceFile());
         } catch (IOException e) {
-            return uncovered.stream().map(n -> "- line " + n).collect(Collectors.joining("\n"));
+            return lineNumbers.stream()
+                    .map(n -> "- line " + n + annotation.apply(n))
+                    .collect(Collectors.joining("\n"));
         }
-        return uncovered.stream()
-                .map(lineNumber -> "- line " + lineNumber + ": `"
+        return lineNumbers.stream()
+                .map(lineNumber -> "- line " + lineNumber + annotation.apply(lineNumber) + ": `"
                         + (lineNumber <= sourceLines.size() ? sourceLines.get(lineNumber - 1).strip() : "")
                         + "`")
                 .collect(Collectors.joining("\n"));
