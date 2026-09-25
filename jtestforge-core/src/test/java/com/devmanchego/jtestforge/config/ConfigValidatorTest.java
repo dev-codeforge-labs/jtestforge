@@ -26,11 +26,24 @@ class ConfigValidatorTest {
     }
 
     @Test
+    void aMissingDependencyTreeFileAndABadJavaVersionAreReportedBeforeARun() throws Exception {
+        JTestForgeConfig config = withProject(fullyValidConfig(),
+                p -> new ProjectConfig(p.modulePath(), p.mavenExecutable(), p.mavenArgs(),
+                        p.javaHome(), p.testSourceRoot(), p.mainSourceRoot(), p.testClassSuffix(),
+                        p.testClassSuffixByTier(), "C:/no/such/deps-tree.txt", null, "eight"));
+
+        ValidationResult result = validator.validate(config, validContext());
+
+        assertThat(result.errors()).extracting(ConfigViolation::path)
+                .contains("project.dependencyTreeFile", "project.javaVersion");
+    }
+
+    @Test
     void modulePathMustExistAndContainAPomXml() throws Exception {
         JTestForgeConfig config = withProject(fullyValidConfig(),
                 p -> new ProjectConfig("C:/this/path/does/not/exist", p.mavenExecutable(), p.mavenArgs(),
                         p.javaHome(), p.testSourceRoot(), p.mainSourceRoot(), p.testClassSuffix(),
-                        p.testClassSuffixByTier()));
+                        p.testClassSuffixByTier(), p.dependencyTreeFile(), p.localRepository(), p.javaVersion()));
 
         ValidationResult result = validator.validate(config, validContext());
 
@@ -41,8 +54,8 @@ class ConfigValidatorTest {
     void theActiveProviderCommandMustBeResolvable() throws Exception {
         JTestForgeConfig base = fullyValidConfig();
         Map<String, ProviderConfig> providers = Map.of("claude",
-                new ProviderConfig("definitely-not-a-real-command-xyz", null, null, null, null));
-        JTestForgeConfig config = withAiProvider(base, new AiProviderConfig("claude", providers));
+                new ProviderConfig("definitely-not-a-real-command-xyz", null, null, null, null, null));
+        JTestForgeConfig config = withAiProvider(base, new AiProviderConfig("claude", providers, null));
 
         ValidationResult result = validator.validate(config, validContext());
 
@@ -203,10 +216,10 @@ class ConfigValidatorTest {
     private JTestForgeConfig fullyValidConfig() throws URISyntaxException {
         Path moduleDir = classpathResource("fixture-module");
         return new JTestForgeConfig(
-                new ProjectConfig(moduleDir.toString(), null, null, null, null, null, null, null),
+                new ProjectConfig(moduleDir.toString(), null, null, null, null, null, null, null, null, null, null),
                 null,
                 new AiProviderConfig("claude", Map.of(
-                        "claude", new ProviderConfig(resolvableCommand(), null, null, null, null))),
+                        "claude", new ProviderConfig(resolvableCommand(), null, null, null, null, null)), null),
                 null,
                 new SpringConfig(SpringEnabledMode.DISABLED, null, null, null, null, null, null, null, null, null, null),
                 null, null, null, null);

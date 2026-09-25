@@ -22,12 +22,12 @@ public record JTestForgeConfig(
 
     public JTestForgeConfig {
         project = project == null
-                ? new ProjectConfig(null, null, null, null, null, null, null, null)
+                ? new ProjectConfig(null, null, null, null, null, null, null, null, null, null, null)
                 : project;
         selection = selection == null
                 ? new SelectionConfig(null, null, null, null, null, null, null)
                 : selection;
-        aiProvider = aiProvider == null ? new AiProviderConfig(null, null) : aiProvider;
+        aiProvider = aiProvider == null ? new AiProviderConfig(null, null, null) : aiProvider;
         prompts = prompts == null
                 ? new PromptsConfig(null, null, null, null, null, null, null, null, null, null, null)
                 : prompts;

@@ -1,5 +1,10 @@
 # Verify behaviour that nothing currently checks in `{{TARGET_METHOD}}`
 
+_No tools here: every file read, directory listing, search or shell command is
+refused and only delays your answer. Everything that exists for this task is
+below. If some detail is missing, stub it with the libraries listed as available
+and carry on — do not go looking. Emit nothing outside the two fenced blocks._
+
 `{{TARGET_METHOD}}` is already executed by the existing tests, but they do not actually
 check parts of what it does: the method could be changed in specific ways and every
 existing test would still pass.

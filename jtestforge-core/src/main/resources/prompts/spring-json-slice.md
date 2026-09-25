@@ -1,5 +1,10 @@
 # Verify how `{{CLASS_FQN}}` binds and serialises
 
+_No tools here: every file read, directory listing, search or shell command is
+refused and only delays your answer. Everything that exists for this task is
+below. If some detail is missing, stub it with the libraries listed as available
+and carry on — do not go looking. Emit nothing outside the two fenced blocks._
+
 Constructing this type directly bypasses everything that matters about it. How external
 values bind onto it, what its defaults are when a value is absent, how relaxed name
 matching resolves, whether a declared constraint actually rejects a bad value, how it

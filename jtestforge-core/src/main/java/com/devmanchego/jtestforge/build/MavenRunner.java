@@ -1,13 +1,13 @@
 package com.devmanchego.jtestforge.build;
 
 import com.devmanchego.jtestforge.util.ExecutableResolver;
+import com.devmanchego.jtestforge.util.JavaHomeEnvironment;
 import com.devmanchego.jtestforge.util.ProcessResult;
 import com.devmanchego.jtestforge.util.ProcessRunner;
 
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -19,7 +19,10 @@ import java.util.Objects;
  *
  * <p>Every invocation this class makes uses the same shape:
  * {@code [resolved mavenExecutable] + mavenArgs + goals}, working directory
- * {@code modulePath}, {@code JAVA_HOME} set from configuration when given.
+ * {@code modulePath}, {@code JAVA_HOME} (and {@code PATH}, see
+ * {@link JavaHomeEnvironment}) set from configuration when given - so the configured JDK
+ * wins even over a launcher script that resolves {@code java} off {@code PATH} rather than
+ * honouring {@code JAVA_HOME} itself.
  *
  * <p>Timeout composition - adding {@code spring.contextLoadTimeoutSeconds} on top of the
  * base build timeout for a Spring-tier unit - is the caller's decision, not this class's:
@@ -51,10 +54,7 @@ public final class MavenRunner {
         command.addAll(mavenArgs);
         command.addAll(goals);
 
-        Map<String, String> environment = new LinkedHashMap<>();
-        if (javaHome != null) {
-            environment.put("JAVA_HOME", javaHome.toString());
-        }
+        Map<String, String> environment = JavaHomeEnvironment.overridesFor(javaHome);
 
         ProcessResult result;
         try {

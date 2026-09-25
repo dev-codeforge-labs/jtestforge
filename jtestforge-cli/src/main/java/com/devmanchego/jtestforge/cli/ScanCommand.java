@@ -3,7 +3,6 @@ package com.devmanchego.jtestforge.cli;
 import com.devmanchego.jtestforge.analysis.ProductionClassScanner;
 import com.devmanchego.jtestforge.analysis.ProductionTypeSolvers;
 import com.devmanchego.jtestforge.analysis.SelectionFilter;
-import com.devmanchego.jtestforge.build.MavenClasspathResolver;
 import com.devmanchego.jtestforge.config.ConfigLoadException;
 import com.devmanchego.jtestforge.config.JTestForgeConfig;
 import com.devmanchego.jtestforge.model.ProductionClass;
@@ -12,7 +11,6 @@ import com.devmanchego.jtestforge.model.SemanticGap;
 import com.devmanchego.jtestforge.model.Tier;
 import com.devmanchego.jtestforge.spring.FrameworkSemanticGapScanner;
 import com.devmanchego.jtestforge.spring.TierClassifier;
-import com.devmanchego.jtestforge.util.ProcessRunner;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Model.CommandSpec;
@@ -20,7 +18,6 @@ import picocli.CommandLine.Spec;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -31,11 +28,12 @@ import java.util.concurrent.Callable;
  * tier classification (§7.4) and framework-semantic gap detection (§7.5) only - no
  * coverage measurement, no AI call, no file write, no Spring context load.
  *
- * <p>Real Maven classpath resolution is not skipped, though: an accurate scan needs the
- * same {@code TypeSolver} a real {@code generate} run would use, or annotations and
+ * <p>Real classpath resolution is not skipped, though: an accurate scan needs the same
+ * {@code TypeSolver} a real {@code generate} run would use, or annotations and
  * collaborator types that only resolve via an external dependency would silently read as
  * unresolved. That one {@code mvn dependency:build-classpath} invocation is the only
- * process this command starts.
+ * process this command starts - and with {@code project.dependencyTreeFile} set, it
+ * starts none.
  */
 @Command(
         name = "scan",
@@ -43,8 +41,6 @@ import java.util.concurrent.Callable;
                 + "attempted, with current coverage. No AI calls, no writes."
 )
 public final class ScanCommand implements Callable<Integer> {
-
-    private static final Duration CLASSPATH_TIMEOUT = Duration.ofMinutes(2);
 
     @Mixin
     private CommonModuleOptions options;
@@ -74,24 +70,24 @@ public final class ScanCommand implements Callable<Integer> {
             return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
         }
 
+        Path configBaseDir = ConfigResolver.resolvePath(options).toAbsolutePath().getParent();
+        ModuleResolution resolution = new ModuleResolution(config.project(), modulePath, configBaseDir,
+                options.verbose ? console::info : null);
         List<ProductionClass> productionClasses;
         try {
-            List<Path> classpath = resolveClasspath(config, modulePath);
+            List<Path> classpath = resolution.compileClasspath();
+            int javaRelease = resolution.javaVersion().release();
             var typeSolver = ProductionTypeSolvers.forModule(mainSourceRoot, classpath);
-            productionClasses = new ProductionClassScanner(typeSolver, mainSourceRoot).scan();
+            productionClasses = new ProductionClassScanner(typeSolver, mainSourceRoot, javaRelease).scan();
         } catch (RuntimeException e) {
+            resolution.report(console);
             console.error("Failed to analyse " + modulePath + ": " + e.getMessage());
             return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
         }
 
+        resolution.report(console);
         printScanResult(console, config, productionClasses);
         return ExitCodes.SUCCESS;
-    }
-
-    private List<Path> resolveClasspath(JTestForgeConfig config, Path modulePath) {
-        var resolver = new MavenClasspathResolver(new ProcessRunner(),
-                config.project().mavenExecutable(), config.project().mavenArgs());
-        return resolver.resolveCompileClasspath(modulePath, CLASSPATH_TIMEOUT);
     }
 
     private void printScanResult(ConsoleOutput console, JTestForgeConfig config, List<ProductionClass> classes) {

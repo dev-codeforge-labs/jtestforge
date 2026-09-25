@@ -10,6 +10,8 @@ package com.devmanchego.jtestforge.model;
  * Telling it what is actually there removes a whole class of wasted repair attempts.
  *
  * <p>A {@code null} version means the library was not found at all.
+ *
+ * @param javaRelease the Java release the module is compiled for, 0 when unknown
  */
 public record TestFrameworkVersions(
         SemanticVersion junitJupiter,
@@ -17,9 +19,21 @@ public record TestFrameworkVersions(
         boolean mockitoJUnitJupiterPresent,
         boolean mockitoInlinePresent,
         SemanticVersion assertJ,
-        SemanticVersion hamcrest) {
+        SemanticVersion hamcrest,
+        int javaRelease) {
+
+    public TestFrameworkVersions(SemanticVersion junitJupiter, SemanticVersion mockito,
+                                 boolean mockitoJUnitJupiterPresent, boolean mockitoInlinePresent,
+                                 SemanticVersion assertJ, SemanticVersion hamcrest) {
+        this(junitJupiter, mockito, mockitoJUnitJupiterPresent, mockitoInlinePresent, assertJ, hamcrest, 0);
+    }
 
     public static TestFrameworkVersions none() {
         return new TestFrameworkVersions(null, null, false, false, null, null);
+    }
+
+    public TestFrameworkVersions withJavaRelease(int release) {
+        return new TestFrameworkVersions(junitJupiter, mockito, mockitoJUnitJupiterPresent,
+                mockitoInlinePresent, assertJ, hamcrest, release);
     }
 }

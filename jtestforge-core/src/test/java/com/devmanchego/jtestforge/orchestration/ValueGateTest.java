@@ -18,7 +18,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class ValueGateTest {
 
-    private final ValueGate gate = new ValueGate(new GenerateConfig(null, null, null, null, null));
+    // requireCoverageGain defaults to false - every test below except the two explicitly
+    // about that default pins the STRICT behaviour, so it is turned on explicitly here.
+    private final ValueGate gate = new ValueGate(new GenerateConfig(null, null, true, null, null));
 
     @Test
     void aPlainUnitTestThatCoversNewLinesIsKept() {
@@ -85,6 +87,15 @@ class ValueGateTest {
 
         assertThat(verdict.keep()).isTrue();
         assertThat(verdict.reason()).contains("requireCoverageGain is off");
+    }
+
+    /** Pins the default itself: an unconfigured {@code generate} block must behave permissively. */
+    @Test
+    void requireCoverageGainIsOffByDefaultWhenNotConfiguredAtAll() {
+        ValueGate defaulted = new ValueGate(new GenerateConfig(null, null, null, null, null));
+
+        assertThat(defaulted.requireCoverageGain()).isFalse();
+        assertThat(defaulted.evaluate(Tier.PLAIN_UNIT, delta(0, 0), List.of()).keep()).isTrue();
     }
 
     @Test

@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -48,6 +49,7 @@ public final class GenerateEngine {
     private final StateStore stateStore;
     private final ExecutionConfig executionConfig;
     private final ContextKeyStabilityTracker contextTracker;
+    private final Consumer<String> progress;
 
     public GenerateEngine(UnitProcessor unitProcessor, ModuleBuild moduleBuild,
                           StateStore stateStore, ExecutionConfig executionConfig) {
@@ -59,11 +61,19 @@ public final class GenerateEngine {
 
     public GenerateEngine(UnitProcessor unitProcessor, ModuleBuild moduleBuild, StateStore stateStore,
                           ExecutionConfig executionConfig, ContextKeyStabilityTracker contextTracker) {
+        this(unitProcessor, moduleBuild, stateStore, executionConfig, contextTracker, null);
+    }
+
+    /** @param progress receives one short, content-free line per unit start and end - on by default */
+    public GenerateEngine(UnitProcessor unitProcessor, ModuleBuild moduleBuild, StateStore stateStore,
+                          ExecutionConfig executionConfig, ContextKeyStabilityTracker contextTracker,
+                          Consumer<String> progress) {
         this.unitProcessor = Objects.requireNonNull(unitProcessor, "unitProcessor");
         this.moduleBuild = Objects.requireNonNull(moduleBuild, "moduleBuild");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.executionConfig = Objects.requireNonNull(executionConfig, "executionConfig");
         this.contextTracker = Objects.requireNonNull(contextTracker, "contextTracker");
+        this.progress = progress;
     }
 
     /** Convenience for a run with no {@code --tier}/{@code --no-spring} restriction. */
@@ -81,7 +91,16 @@ public final class GenerateEngine {
      */
     public GenerateResult run(RunState initialState, Function<WorkUnit, UnitContext> contextLookup,
                               TierRestriction restriction) {
-        List<String> preExistingFailures = failingTestNames(moduleBuild.runFullSuite());
+        TestRunOutcome preflight = moduleBuild.runFullSuite();
+        if (preflight.buildFailedBeforeTests()) {
+            // The module does not build at all - nothing downstream can mean anything, and
+            // continuing would blame every generated test for an error that predates the run.
+            List<String> reason = preflight.buildFailureSummary();
+            LOGGER.error("The module does not build before this run started: {}", reason);
+            return new GenerateResult(stateStore.save(initialState),
+                    GenerateResult.ExitReason.PREFLIGHT_FAILED, reason);
+        }
+        List<String> preExistingFailures = failingTestNames(preflight);
         if (!preExistingFailures.isEmpty()) {
             // §2: the module must already build green. Generating against a red suite
             // would make every later "did this test pass?" answer meaningless.
@@ -96,7 +115,12 @@ public final class GenerateEngine {
         int unitsProcessed = 0;
         boolean anythingKept = false;
 
-        for (WorkUnit unit : unitsToProcess(state, restriction)) {
+        List<WorkUnit> pending = unitsToProcess(state, restriction);
+        int total = pending.size();
+        int index = 0;
+
+        for (WorkUnit unit : pending) {
+            index++;
             if (reachedUnitLimit(unitsProcessed)) {
                 LOGGER.info("Reached execution.maxUnitsPerRun ({}); stopping.", executionConfig.maxUnitsPerRun());
                 break;
@@ -111,11 +135,14 @@ public final class GenerateEngine {
 
             state = stateStore.markInProgress(state, unit.id());
             unitsProcessed++;
+            reportProgress("[" + index + "/" + total + "] " + unit.id().format());
 
             long startedAt = System.currentTimeMillis();
             UnitOutcome outcome = processSafely(unit, contextLookup);
             long durationMillis = System.currentTimeMillis() - startedAt;
             state = stateStore.updateUnit(state, applyOutcome(state, unit.id(), outcome, durationMillis));
+            reportProgress("  -> " + outcome.status()
+                    + (outcome.succeeded() ? " (" + outcome.addedTests().size() + " test(s) kept)" : ""));
 
             if (outcome.succeeded()) {
                 anythingKept = true;
@@ -167,7 +194,13 @@ public final class GenerateEngine {
      * loudly rather than left for the developer's next build to discover.
      */
     private GenerateResult finalise(RunState state, boolean anythingKept) {
-        List<String> failures = failingTestNames(moduleBuild.runFullSuite());
+        TestRunOutcome finalRun = moduleBuild.runFullSuite();
+        if (finalRun.buildFailedBeforeTests()) {
+            List<String> reason = finalRun.buildFailureSummary();
+            LOGGER.error("The module no longer builds at the end of the run: {}", reason);
+            return new GenerateResult(state, GenerateResult.ExitReason.FULL_SUITE_RED, reason);
+        }
+        List<String> failures = failingTestNames(finalRun);
         if (!failures.isEmpty()) {
             LOGGER.error("Every unit passed in isolation, but the module's full suite is now failing: {}",
                     failures);
@@ -215,6 +248,12 @@ public final class GenerateEngine {
             }
         }
         return TierScheduler.order(pending);
+    }
+
+    private void reportProgress(String message) {
+        if (progress != null) {
+            progress.accept(message);
+        }
     }
 
     private boolean reachedUnitLimit(int unitsProcessed) {

@@ -60,4 +60,22 @@ class ExecutableResolverTest {
     void systemPathDirectoriesIsNonEmptyInAnyRealEnvironment() {
         assertThat(ExecutableResolver.systemPathDirectories()).isNotEmpty();
     }
+
+    /**
+     * A stray quote in a PATH entry - seen in the wild from a corporate JAVA_HOME/PATH
+     * setup - used to throw {@code InvalidPathException} out of {@code Path.of(directory)}
+     * and abort the whole search; it must instead be skipped like any other dead entry.
+     */
+    @Test
+    void aMalformedPathEntryIsSkippedRatherThanAbortingTheSearch(@TempDir Path pathDir) throws Exception {
+        Path script = Files.createFile(pathDir.resolve("mvn.cmd"));
+        List<String> pathDirectories = List.of("\"C:\\tools\\java\\openjdk8-temurin\"\\bin", pathDir.toString());
+
+        assertThat(ExecutableResolver.resolve("mvn", pathDirectories)).contains(script);
+    }
+
+    @Test
+    void aPathThatIsOnlyAMalformedEntryDoesNotResolveButDoesNotThrowEither() {
+        assertThat(ExecutableResolver.resolve("mvn", List.of("\"C:\\tools\\java\\openjdk8-temurin\"\\bin"))).isEmpty();
+    }
 }

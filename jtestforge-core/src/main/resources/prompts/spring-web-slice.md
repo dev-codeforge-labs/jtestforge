@@ -1,5 +1,10 @@
 # Verify the HTTP contract of `{{CLASS_FQN}}`
 
+_No tools here: every file read, directory listing, search or shell command is
+refused and only delays your answer. Everything that exists for this task is
+below. If some detail is missing, stub it with the libraries listed as available
+and carry on — do not go looking. Emit nothing outside the two fenced blocks._
+
 This is a `{{SPRING_STEREOTYPE}}`. Its handler bodies are already unit-tested by calling
 them directly — but calling a handler directly bypasses everything Spring does around it.
 The path it answers on, how a request binds to its arguments, whether constraints are

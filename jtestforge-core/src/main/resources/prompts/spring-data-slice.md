@@ -1,5 +1,10 @@
 # Verify what the queries on `{{CLASS_FQN}}` actually return
 
+_No tools here: every file read, directory listing, search or shell command is
+refused and only delays your answer. Everything that exists for this task is
+below. If some detail is missing, stub it with the libraries listed as available
+and carry on — do not go looking. Emit nothing outside the two fenced blocks._
+
 The query methods on this repository have no bodies to unit-test. What each one returns is
 decided by Spring Data — from the method's name, or from its declared query text. Nothing
 currently proves that what it returns is what its name claims.

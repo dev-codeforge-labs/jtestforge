@@ -2,6 +2,7 @@ package com.devmanchego.jtestforge.util;
 
 import java.io.File;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
@@ -56,7 +57,14 @@ public final class ExecutableResolver {
             if (directory == null || directory.isBlank()) {
                 continue;
             }
-            Path candidateDir = Path.of(directory);
+            Path candidateDir;
+            try {
+                candidateDir = Path.of(directory);
+            } catch (InvalidPathException e) {
+                // A malformed PATH entry (a stray quote from some corporate JAVA_HOME/PATH
+                // setup, for instance) must not abort the search for every other entry.
+                continue;
+            }
             for (String extension : WINDOWS_EXECUTABLE_EXTENSIONS) {
                 Path candidate = candidateDir.resolve(command + extension);
                 if (Files.isRegularFile(candidate)) {

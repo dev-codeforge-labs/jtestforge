@@ -89,6 +89,7 @@ public final class UnitPromptFactory {
                 .with(PromptPlaceholder.EXISTING_TEST_NAMES, assembler.existingTestNames(context.testClassInfo()))
                 .with(PromptPlaceholder.FRAMEWORK_VERSIONS, assembler.frameworkVersions(context.frameworkVersions()))
                 .with(PromptPlaceholder.UNCOVERED_LINES, uncoveredLines(context))
+                .with(PromptPlaceholder.UNCOVERED_BRANCHES, uncoveredBranches(context))
                 .with(PromptPlaceholder.BEHAVIOUR_GAPS,
                         assembler.behaviourGaps(mutantTranslator.translateAll(context.targetMutants())))
                 .with(PromptPlaceholder.COMPILER_ERRORS, assembler.compilerErrors(compilerErrors))
@@ -113,6 +114,14 @@ public final class UnitPromptFactory {
             return "_(none)_";
         }
         return assembler.uncoveredLines(context.productionClass(), context.targetMethod(),
+                context.coverageBefore());
+    }
+
+    private String uncoveredBranches(UnitContext context) {
+        if (context.coverageBefore() == null) {
+            return "_(none)_";
+        }
+        return assembler.uncoveredBranches(context.productionClass(), context.targetMethod(),
                 context.coverageBefore());
     }
 }

@@ -55,8 +55,15 @@ public final class CoverageAndGapAcceptanceGate implements UnitAcceptanceGate {
                 delta == null ? 0 : delta.branchesCoveredDelta());
     }
 
+    /**
+     * Skips the {@code jacoco:report} invocation entirely when {@code requireCoverageGain}
+     * is off - {@link ValueGate} would keep the candidate regardless of what this measures
+     * (for {@code PLAIN_UNIT} at least), so the call would only be spending a Maven
+     * round-trip, and a real risk of failure on a module with a broken JaCoCo setup, to
+     * produce a number nothing consults.
+     */
     private CoverageDelta measureCoverageDelta(UnitContext context) {
-        if (context.coverageBefore() == null) {
+        if (context.coverageBefore() == null || !valueGate.requireCoverageGain()) {
             return null;
         }
         Optional<ClassCoverage> after = moduleBuild.measureCoverage(context.productionClass().fqn());

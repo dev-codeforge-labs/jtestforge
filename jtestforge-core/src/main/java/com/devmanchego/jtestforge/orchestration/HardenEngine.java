@@ -101,7 +101,13 @@ public final class HardenEngine {
      */
     public HardenResult run(RunState initialState, List<TierScopedTestClass> eligibleClasses,
                             Function<List<Mutant>, UnitContext> contextLookup) {
-        List<String> preExistingFailures = failingTestNames(moduleBuild.runFullSuite());
+        com.devmanchego.jtestforge.build.TestRunOutcome preflight = moduleBuild.runFullSuite();
+        if (preflight.buildFailedBeforeTests()) {
+            List<String> reason = preflight.buildFailureSummary();
+            LOGGER.error("The module does not build; harden requires a module that builds green: {}", reason);
+            return new HardenResult(stateStore.save(initialState), HardenResult.ExitReason.PREFLIGHT_FAILED, reason);
+        }
+        List<String> preExistingFailures = failingTestNames(preflight);
         if (!preExistingFailures.isEmpty()) {
             // §10.1 step 1: hardening a red suite is meaningless.
             LOGGER.error("The module's test suite is already failing; harden requires a green suite: {}",
@@ -271,7 +277,13 @@ public final class HardenEngine {
      * scoped verification passed.
      */
     private HardenResult finalise(RunState state, boolean anythingKept, MutationReport baseline) {
-        List<String> failures = failingTestNames(moduleBuild.runFullSuite());
+        com.devmanchego.jtestforge.build.TestRunOutcome finalRun = moduleBuild.runFullSuite();
+        if (finalRun.buildFailedBeforeTests()) {
+            List<String> reason = finalRun.buildFailureSummary();
+            LOGGER.error("The module no longer builds at the end of the run: {}", reason);
+            return new HardenResult(state, HardenResult.ExitReason.FULL_SUITE_RED, reason, null);
+        }
+        List<String> failures = failingTestNames(finalRun);
         if (!failures.isEmpty()) {
             LOGGER.error("Every unit passed in isolation, but the module's full suite is now failing: {}",
                     failures);

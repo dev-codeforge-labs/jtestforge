@@ -7,11 +7,9 @@ import com.devmanchego.jtestforge.analysis.TestClassLocator;
 import com.devmanchego.jtestforge.analysis.TestClassMerger;
 import com.devmanchego.jtestforge.analysis.TestClassReverter;
 import com.devmanchego.jtestforge.analysis.TestClassScanner;
-import com.devmanchego.jtestforge.build.MavenClasspathResolver;
 import com.devmanchego.jtestforge.build.MavenModuleBuild;
 import com.devmanchego.jtestforge.build.MavenRunner;
 import com.devmanchego.jtestforge.build.ModuleBuild;
-import com.devmanchego.jtestforge.build.ModuleDependencyResolver;
 import com.devmanchego.jtestforge.build.TestFrameworkDetector;
 import com.devmanchego.jtestforge.config.JTestForgeConfig;
 import com.devmanchego.jtestforge.config.SpringEnabledMode;
@@ -80,8 +78,6 @@ import java.util.UUID;
 final class GenerateRunner {
 
     private static final Duration BUILD_TIMEOUT = Duration.ofMinutes(10);
-    private static final Duration CLASSPATH_TIMEOUT = Duration.ofMinutes(2);
-    private static final Duration DEPENDENCY_TIMEOUT = Duration.ofMinutes(2);
 
     private final JTestForgeConfig config;
     private final Path modulePath;
@@ -92,6 +88,9 @@ final class GenerateRunner {
     private final MavenRunner mavenRunner;
     private final ModuleBuild moduleBuild;
     private final StateStore stateStore;
+    private final ModuleResolution resolution;
+    private final java.util.function.Consumer<String> verboseSink;
+    private final java.util.function.Consumer<String> progress;
 
     private SpringStackFacts springFacts;
     private SpringTierState springTierState;
@@ -99,18 +98,47 @@ final class GenerateRunner {
     private List<ProductionClass> productionClasses;
 
     GenerateRunner(JTestForgeConfig config, Path modulePath, Path stateDir, Path configBaseDir, String configHash) {
+        this(config, modulePath, stateDir, configBaseDir, configHash, null, null);
+    }
+
+    /** @param verboseSink receives every external command (Maven, the AI provider) this run launches - see {@code -v} */
+    GenerateRunner(JTestForgeConfig config, Path modulePath, Path stateDir, Path configBaseDir, String configHash,
+                  java.util.function.Consumer<String> verboseSink) {
+        this(config, modulePath, stateDir, configBaseDir, configHash, verboseSink, null);
+    }
+
+    /**
+     * @param verboseSink receives every external command (Maven, the AI provider) this run launches - see {@code -v}
+     * @param progress    receives one short, content-free line per AI request/response, per
+     *                    compile/test-run/coverage check, and per unit start/end - on by
+     *                    default, regardless of {@code -v}, so a long run never looks stalled
+     */
+    GenerateRunner(JTestForgeConfig config, Path modulePath, Path stateDir, Path configBaseDir, String configHash,
+                  java.util.function.Consumer<String> verboseSink, java.util.function.Consumer<String> progress) {
         this.config = config;
         this.modulePath = modulePath;
         this.stateDir = stateDir;
         this.configBaseDir = configBaseDir;
         this.configHash = configHash;
+        this.verboseSink = verboseSink;
+        this.progress = progress;
         this.mavenRunner = buildMavenRunner();
         this.moduleBuild = new MavenModuleBuild(mavenRunner, modulePath, BUILD_TIMEOUT);
         this.stateStore = new StateStore(stateDir, Clock.systemUTC());
+        this.resolution = new ModuleResolution(config.project(), modulePath, configBaseDir, verboseSink);
     }
 
     StateStore stateStore() {
         return stateStore;
+    }
+
+    /** Null until {@link #detectSpringFacts()} has run. */
+    TestFrameworkVersions frameworkVersions() {
+        return frameworkVersions;
+    }
+
+    ModuleResolution moduleResolution() {
+        return resolution;
     }
 
     /**
@@ -120,11 +148,10 @@ final class GenerateRunner {
      * forever, since nothing here is expensive enough to warrant guarding against re-use.
      */
     SpringStackFacts detectSpringFacts() {
-        List<ModuleDependency> dependencies = new ModuleDependencyResolver(
-                new ProcessRunner(), config.project().mavenExecutable(), config.project().mavenArgs())
-                .resolveDependencies(modulePath, DEPENDENCY_TIMEOUT);
+        List<ModuleDependency> dependencies = resolution.dependencies();
         this.springFacts = new SpringStackDetector().detect(dependencies);
-        this.frameworkVersions = new TestFrameworkDetector().detect(dependencies);
+        this.frameworkVersions = new TestFrameworkDetector().detect(dependencies)
+                .withJavaRelease(resolution.javaVersion().release());
         this.springTierState = effectivelyEnabled(springFacts)
                 ? new SpringStackDetector().resolveTierAvailability(springFacts, config.spring())
                 : SpringTierState.springDisabled(config.spring().maxContextLoadsPerRun());
@@ -149,11 +176,10 @@ final class GenerateRunner {
             detectSpringFacts();
         }
         Path mainSourceRoot = modulePath.resolve(config.project().mainSourceRoot());
-        List<Path> classpath = new MavenClasspathResolver(
-                new ProcessRunner(), config.project().mavenExecutable(), config.project().mavenArgs())
-                .resolveCompileClasspath(modulePath, CLASSPATH_TIMEOUT);
+        List<Path> classpath = resolution.compileClasspath();
         var typeSolver = ProductionTypeSolvers.forModule(mainSourceRoot, classpath);
-        this.productionClasses = new ProductionClassScanner(typeSolver, mainSourceRoot).scan();
+        this.productionClasses = new ProductionClassScanner(
+                typeSolver, mainSourceRoot, resolution.javaVersion().release()).scan();
 
         Map<String, ClassCoverage> baselineCoverage = measureBaselineCoverage();
 
@@ -162,9 +188,19 @@ final class GenerateRunner {
                 productionClasses, baselineCoverage, springTierState, springFacts, frameworkVersions));
     }
 
-    /** §9 step 2: one whole-module build, parsed once - not per-class, unlike a unit's own value gate. */
+    /**
+     * §9 step 2: one whole-module build, parsed once - not per-class, unlike a unit's own
+     * value gate. {@code jacoco:report} is skipped entirely when
+     * {@code generate.requireCoverageGain} is off: nothing downstream (the value gate, or
+     * unit selection here) ends up needing the numbers, and skipping the call sidesteps a
+     * broken JaCoCo setup on the target module rather than making the whole run depend on
+     * it needlessly. {@code test} alone is still required - it is the preflight that
+     * confirms the module builds green (§2), not just a means to produce coverage data.
+     */
     private Map<String, ClassCoverage> measureBaselineCoverage() {
-        mavenRunner.run(modulePath, List.of("test", "jacoco:report"), BUILD_TIMEOUT);
+        List<String> goals = config.generate().requireCoverageGain()
+                ? List.of("test", "jacoco:report") : List.of("test");
+        mavenRunner.run(modulePath, goals, BUILD_TIMEOUT);
         Path report = modulePath.resolve("target/site/jacoco/jacoco.xml");
         if (!Files.isRegularFile(report)) {
             return Map.of();
@@ -194,7 +230,7 @@ final class GenerateRunner {
 
         DefaultUnitProcessor processor = new DefaultUnitProcessor(
                 provider,
-                new TranscriptWriter(stateDir),
+                new TranscriptWriter(stateDir, progress, verboseSink),
                 new UnitPromptFactory(new PromptTemplateLoader().load(config.prompts(), configBaseDir),
                         new PromptRenderer(config.context().maxPromptChars()),
                         new ContextAssembler(config.context())),
@@ -207,7 +243,8 @@ final class GenerateRunner {
                         new ValueGate(config.generate())),
                 config.generate(),
                 providerTimeout,
-                springSupport);
+                springSupport,
+                progress);
 
         var executionConfig = maxUnitsOverride > 0
                 ? new com.devmanchego.jtestforge.config.ExecutionConfig(
@@ -216,7 +253,7 @@ final class GenerateRunner {
                         maxUnitsOverride)
                 : config.execution();
 
-        GenerateEngine engine = new GenerateEngine(processor, moduleBuild, stateStore, executionConfig, tracker);
+        GenerateEngine engine = new GenerateEngine(processor, moduleBuild, stateStore, executionConfig, tracker, progress);
         return engine.run(initialState, workUnit -> contextFor(byUnitId, workUnit), restriction);
     }
 
@@ -305,9 +342,31 @@ final class GenerateRunner {
 
     private MavenRunner buildMavenRunner() {
         String javaHome = config.project().javaHome();
+        ProcessRunner processRunner =
+                new ProcessRunner(java.nio.charset.Charset.defaultCharset(), verboseSink, progress);
+        List<String> mavenArgs = effectiveMavenArgs();
         return javaHome == null
-                ? new MavenRunner(new ProcessRunner(), config.project().mavenExecutable(), config.project().mavenArgs())
-                : new MavenRunner(new ProcessRunner(), config.project().mavenExecutable(),
-                        config.project().mavenArgs(), Path.of(javaHome));
+                ? new MavenRunner(processRunner, config.project().mavenExecutable(), mavenArgs)
+                : new MavenRunner(processRunner, config.project().mavenExecutable(), mavenArgs, Path.of(javaHome));
+    }
+
+    /**
+     * Appends {@code -Djacoco.skip=true} when {@code generate.requireCoverageGain} is off.
+     * That flag already keeps JTestForge from ever calling {@code jacoco:report} itself
+     * (see {@link #measureBaselineCoverage()}), but it does nothing about a {@code
+     * default-instrument}/{@code default-prepare-agent} execution the TARGET module's own
+     * pom binds to the ordinary build lifecycle - every {@code test-compile}/{@code test}
+     * JTestForge runs would still trigger it and could still fail on a broken JaCoCo setup
+     * (found in practice) even though coverage was never going to be consulted anyway.
+     */
+    private List<String> effectiveMavenArgs() {
+        List<String> args = new java.util.ArrayList<>(config.project().mavenArgs());
+        if (!config.generate().requireCoverageGain()) {
+            args.add("-Djacoco.skip=true");
+            if (progress != null) {
+                progress.accept("JaCoCo disabled (generate.requireCoverageGain is false)");
+            }
+        }
+        return List.copyOf(args);
     }
 }

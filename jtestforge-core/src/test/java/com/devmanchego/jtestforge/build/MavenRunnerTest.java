@@ -83,4 +83,38 @@ class MavenRunnerTest {
 
         assertThat(result.succeeded()).isTrue();
     }
+
+    /**
+     * Not just "the run still succeeds" - the actual JDK Maven's own JVM starts on must be
+     * the one configured, provable only by asking Maven itself which Java it is running on.
+     * Guards against a regression where {@code JAVA_HOME} is exported to the child process
+     * but a launcher script resolves {@code java} off {@code PATH} first and ignores it.
+     */
+    @Test
+    void mavenActuallyRunsOnTheConfiguredJdkNotWhateverPathWouldHaveResolved() {
+        Path otherJdk = anotherInstalledJdk();
+        Assumptions.assumeTrue(otherJdk != null,
+                "No second installed JDK (different from the running one) found to differentiate this test.");
+
+        MavenRunner runner = new MavenRunner(new ProcessRunner(), "mvn", List.of("-o", "-B"), otherJdk);
+
+        MavenRunResult result = runner.run(ownModuleDirectory, List.of("--version"), TIMEOUT);
+
+        assertThat(result.succeeded()).isTrue();
+        assertThat(result.stdout()).contains("runtime: " + otherJdk);
+    }
+
+    /** A JDK installation directory that is not the one this test JVM itself is running on. */
+    private static Path anotherInstalledJdk() {
+        Path runningJdk = Path.of(System.getProperty("java.home"));
+        for (String candidate : List.of(
+                "C:/Program Files/Java/jdk1.8.0_202", "C:/work/java/jdk21", "C:/work/java/jre8")) {
+            Path path = Path.of(candidate);
+            if (Files.isDirectory(path) && !path.equals(runningJdk)
+                    && Files.isRegularFile(path.resolve("bin").resolve("java.exe"))) {
+                return path;
+            }
+        }
+        return null;
+    }
 }

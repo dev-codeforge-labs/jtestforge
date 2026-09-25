@@ -8,7 +8,26 @@ project:
   mavenExecutable: mvn
   # Extra args prepended to every Maven invocation. -o keeps the loop offline.
   mavenArgs: ["-o", "-B"]
-  # javaHome: C:/Program Files/Java/jdk-21
+  # JDK every Maven call runs on, exported as JAVA_HOME. Empty: whatever mvn picks up
+  # normally. Overridden per invocation by --java-home.
+  javaHome:
+  # Java release the module's code is written for (8, 1.8, 11, 17...). Empty: detected
+  # from the pom's compiler settings (parents included), else from target/ bytecode.
+  # Overridden per invocation by --java-version.
+  javaVersion:
+  # Saved `mvn dependency:tree` output used INSTEAD of running Maven to resolve the
+  # module's dependencies. One file may cover the whole multi-module application; the
+  # module's block is found by its groupId:artifactId. Create it from the reactor root:
+  #   mvn test-compile dependency:tree -DoutputFile=C:/tmp/deps-tree.txt -DappendOutput=true
+  # Empty: dependencies are resolved by running Maven, as usual. Overridden per
+  # invocation by --dependency-tree.
+  dependencyTreeFile:
+  # Local Maven repository holding the jars named in dependencyTreeFile (also used, with
+  # a dependencyTreeFile, to resolve a parent pom.xml when detecting javaVersion). Empty:
+  # detected the way Maven itself would (-Dmaven.repo.local in mavenArgs, then
+  # ~/.m2/settings.xml, then the Maven installation's own settings.xml, then
+  # ~/.m2/repository). Overridden per invocation by --local-repository.
+  localRepository:
   testSourceRoot: src/test/java
   mainSourceRoot: src/main/java
   # Test class naming for a production class Foo -> FooTest.
@@ -41,6 +60,16 @@ selection:
 # --- AI provider -------------------------------------------------------------
 aiProvider:
   active: claude
+  # Start the AI CLI in an EMPTY directory instead of the target module.
+  #
+  # Modern AI CLIs are agentic: they treat their working directory as a workspace and
+  # grep/read files in it before answering. Pointed at a large legacy module (whose
+  # target/ this tool keeps repopulating), that turns a one-shot question into minutes
+  # of tool round-trips per call. JTestForge already puts the full production class,
+  # collaborator signatures and the existing test class INTO the prompt, so the CLI has
+  # nothing to gain from the module being in view. The empty directory is created at
+  # <stateDir>/ai-cwd. Set false only for a provider that genuinely needs the module.
+  isolateWorkingDirectory: true
   providers:
     claude:
       command: claude
@@ -52,12 +81,54 @@ aiProvider:
       transportRetries: 2
     gemini:
       command: gemini.cmd
-      args: ["-p"]
-      promptDelivery: argument
+      # An empty -p value switches gemini to non-interactive mode without putting the
+      # prompt itself on the command line - gemini's own --help documents -p's value as
+      # "Appended to input on stdin (if any)", so the real prompt travels via stdin below.
+      # promptDelivery: argument would put the whole prompt on the command line instead,
+      # which is what used to fail on Windows: cmd.exe's ~8191-char line limit for
+      # anything beyond a trivial method, and mangled quoting/backslashes for the rest.
+      args: ["-p", ""]
+      promptDelivery: stdin        # stdin | argument | file
+      # Worst case per unit is timeoutSeconds x (transportRetries + 1). The timeout is
+      # enforced by killing the whole process tree, not just the launched command - a
+      # .cmd wrapper that shells out to node.exe would otherwise leave that child alive
+      # holding the output pipe, stalling the run long past this value.
       timeoutSeconds: 300
       transportRetries: 2
+      # Environment variables for THIS CLI only, merged over the inherited environment.
+      # JTestForge does not interpret them. Useful when the CLI's own defaults do not fit
+      # a locked-down corporate machine:
+      # env:
+      #   GEMINI_CLI_HOME: C:/tools/gemini-home   # see the policies note below
+      #   DEBUG: "1"                              # the CLI logs what it is doing; its
+      #                                           # stderr is kept per attempt in
+      #                                           # <stateDir>/transcripts/<unit>/N.stderr.log
   # API keys are NEVER read from this file. They are inherited from the process
   # environment, exactly as the CLI itself expects them.
+  #
+  # PERFORMANCE, for an agentic CLI (Gemini CLI, Claude Code, ...): its tools are pure
+  # latency here, because every piece of context the model needs is already in the
+  # prompt. isolateWorkingDirectory above removes anything worth exploring; turning the
+  # tools off outright is the CLI's own configuration. For the Gemini CLI, put this in
+  # <home>/.gemini/policies/jtestforge.toml:
+  #
+  #   [[rule]]
+  #   toolName = "*"
+  #   decision = "deny"
+  #   priority = 999
+  #   denyMessage = "Tools are disabled: JTestForge supplies all context in the prompt"
+  #
+  # <home> is the system home directory by default. When that is locked down (a corporate
+  # profile you cannot write to), point GEMINI_CLI_HOME at a directory you own via the env
+  # block above - the CLI then creates and reads .gemini there instead. That moves ALL
+  # user-level config, so copy any existing settings.json/credentials into the new home
+  # first, or the CLI will behave as if it had never been configured. Workspace-level
+  # policies (<cwd>/.gemini/policies) are NOT a substitute: that tier is currently
+  # disabled upstream. The older tools.exclude in settings.json and the --allowed-tools
+  # flag still work but are deprecated in favour of these policy files.
+  #
+  # Installing ripgrep on PATH is worth it too: without it the CLI falls back to a much
+  # slower search of whatever directory it can see.
 
 # --- Prompt templates --------------------------------------------------------
 # External files so they can be versioned and A/B compared without recompiling.
@@ -117,7 +188,11 @@ context:
 generate:
   maxTestsPerMethod: 5
   maxRepairAttempts: 2          # compilation/assertion repair rounds per unit
-  requireCoverageGain: true     # discard a test that adds no covered line/branch
+  # Default false: any test that compiles and passes is kept, even with zero coverage
+  # gain - and jacoco:report is never invoked, sidestepping a broken JaCoCo setup on the
+  # target module. Set true to discard a test that adds no covered line/branch (and
+  # bring jacoco:report back, since the gate needs its numbers again).
+  requireCoverageGain: false
   requireAssertion: true        # discard a test with no assertion (11.1)
   rejectMockOnlyTests: true     # discard a test whose only checks are verify(...)
 

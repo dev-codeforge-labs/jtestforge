@@ -2,6 +2,7 @@ package com.devmanchego.jtestforge.build;
 
 import com.devmanchego.jtestforge.model.ModuleDependency;
 import com.devmanchego.jtestforge.util.ExecutableResolver;
+import com.devmanchego.jtestforge.util.JavaHomeEnvironment;
 import com.devmanchego.jtestforge.util.ProcessResult;
 import com.devmanchego.jtestforge.util.ProcessRunner;
 
@@ -29,11 +30,19 @@ public final class ModuleDependencyResolver {
     private final ProcessRunner processRunner;
     private final String mavenExecutable;
     private final List<String> mavenArgs;
+    private final Path javaHome;
 
     public ModuleDependencyResolver(ProcessRunner processRunner, String mavenExecutable, List<String> mavenArgs) {
+        this(processRunner, mavenExecutable, mavenArgs, null);
+    }
+
+    /** @param javaHome exported to Maven via {@link JavaHomeEnvironment} when not null, as {@link MavenRunner} does */
+    public ModuleDependencyResolver(ProcessRunner processRunner, String mavenExecutable, List<String> mavenArgs,
+                                    Path javaHome) {
         this.processRunner = Objects.requireNonNull(processRunner, "processRunner");
         this.mavenExecutable = Objects.requireNonNull(mavenExecutable, "mavenExecutable");
         this.mavenArgs = List.copyOf(mavenArgs);
+        this.javaHome = javaHome;
     }
 
     /** @param modulePath the Maven module to resolve, per §2 required to already build green */
@@ -47,7 +56,8 @@ public final class ModuleDependencyResolver {
 
         try {
             List<String> command = buildCommand(outputFile);
-            ProcessResult result = processRunner.run(command, modulePath, Map.of(), null, timeout);
+            ProcessResult result = processRunner.run(
+                    command, modulePath, JavaHomeEnvironment.overridesFor(javaHome), null, timeout);
 
             if (result.timedOut()) {
                 throw new MavenClasspathResolutionException(

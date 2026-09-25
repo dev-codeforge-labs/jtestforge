@@ -61,6 +61,35 @@ class ScanCommandTest {
         assertThat(outcome.err).contains("pom.xml");
     }
 
+    @Test
+    void aSavedDependencyTreeReplacesTheMavenCallEntirely(@TempDir Path dir) throws IOException {
+        Files.writeString(dir.resolve("pom.xml"), "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">"
+                + "<modelVersion>4.0.0</modelVersion><groupId>com.acme</groupId><artifactId>shop</artifactId>"
+                + "<version>1.0</version><properties><maven.compiler.source>1.8</maven.compiler.source>"
+                + "</properties></project>");
+        Path source = dir.resolve("src/main/java/com/acme/PriceCalculator.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, "package com.acme;\n\npublic class PriceCalculator {\n"
+                + "    public int total(int price, int quantity) {\n"
+                + "        return quantity > 10 ? price * quantity * 9 / 10 : price * quantity;\n    }\n}\n");
+        Files.writeString(dir.resolve("deps-tree.txt"),
+                "com.acme:shop:jar:1.0\n\\- org.slf4j:slf4j-api:jar:1.7.36:compile\n");
+        Files.createDirectories(dir.resolve("repo"));
+        // Had Maven been started at all, this executable could not be found and the scan would fail.
+        Files.writeString(dir.resolve("jtestforge.yaml"), "project:\n  modulePath: .\n"
+                + "  mavenExecutable: definitely-not-a-real-maven-executable\n"
+                + "  dependencyTreeFile: deps-tree.txt\n  localRepository: repo\n", StandardCharsets.UTF_8);
+
+        CommandOutcome outcome = run(dir);
+
+        assertThat(outcome.exitCode).isEqualTo(0);
+        assertThat(outcome.out + outcome.err)
+                .contains("Dependencies of com.acme:shop read from").contains("(Maven not run)")
+                .contains("Java level of the module: 8")
+                .contains("not on disk").contains("slf4j-api")
+                .contains("Scanned 1 production class(es)");
+    }
+
     private void writeMinimalConfig(Path dir) throws IOException {
         Files.writeString(dir.resolve("jtestforge.yaml"), "project:\n  modulePath: .\n", StandardCharsets.UTF_8);
     }

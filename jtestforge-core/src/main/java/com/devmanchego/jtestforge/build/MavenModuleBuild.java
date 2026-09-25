@@ -46,23 +46,42 @@ public final class MavenModuleBuild implements ModuleBuild {
         MavenRunResult result = mavenRunner.run(modulePath, List.of("test-compile"), buildTimeout);
         return result.succeeded()
                 ? CompileOutcome.success()
-                : CompileOutcome.failure(result.compilerErrors());
+                : CompileOutcome.failure(result.compilerErrors(), rawLog(result));
+    }
+
+    /**
+     * The complete build output, kept alongside {@code compilerErrors} rather than instead
+     * of them: {@link CompilerErrorParser} only recognises {@code javac}'s own diagnostic
+     * shape, so a build that fails for any other reason (an annotation processor, a plugin
+     * execution, a dependency it cannot resolve) would otherwise leave the fix-compilation
+     * prompt - and any later diagnosis - with nothing to act on at all.
+     */
+    private String rawLog(MavenRunResult result) {
+        StringBuilder log = new StringBuilder();
+        if (result.timedOut()) {
+            log.append("(build timed out)\n");
+        } else {
+            log.append("Exit code: ").append(result.exitCode()).append('\n');
+        }
+        log.append("\n--- stdout ---\n").append(result.stdout());
+        log.append("\n--- stderr ---\n").append(result.stderr());
+        return log.toString();
     }
 
     @Override
     public TestRunOutcome runScopedTests(String testClassSimpleName, List<String> methodNames) {
         clearPreviousReports();
-        mavenRunner.run(modulePath,
+        MavenRunResult result = mavenRunner.run(modulePath,
                 List.of("test", ScopedTestSelector.buildArgument(testClassSimpleName, methodNames)),
                 buildTimeout);
-        return readSurefireReports();
+        return readSurefireReports(result);
     }
 
     @Override
     public TestRunOutcome runFullSuite() {
         clearPreviousReports();
-        mavenRunner.run(modulePath, List.of("test"), buildTimeout);
-        return readSurefireReports();
+        MavenRunResult result = mavenRunner.run(modulePath, List.of("test"), buildTimeout);
+        return readSurefireReports(result);
     }
 
     @Override
@@ -77,8 +96,14 @@ public final class MavenModuleBuild implements ModuleBuild {
                 .findFirst();
     }
 
-    private TestRunOutcome readSurefireReports() {
-        return new TestRunOutcome(surefireReportParser.parseDirectory(modulePath.resolve(SUREFIRE_REPORTS)));
+    /**
+     * Maven's own exit status travels with the Surefire results on purpose - see
+     * {@link TestRunOutcome}: a build that never reached the test phase reports no
+     * failures, which is indistinguishable from success if only the reports are read.
+     */
+    private TestRunOutcome readSurefireReports(MavenRunResult result) {
+        return new TestRunOutcome(surefireReportParser.parseDirectory(modulePath.resolve(SUREFIRE_REPORTS)),
+                result.succeeded(), rawLog(result));
     }
 
     /**

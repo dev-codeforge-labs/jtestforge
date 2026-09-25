@@ -62,6 +62,44 @@ class GenerateEngineTest {
         assertThat(processor.invocations()).isZero();
     }
 
+    /**
+     * A module that does not compile produces NO Surefire reports, so judging the preflight
+     * on reports alone reads as "nothing failed". That is how a broken module used to reach
+     * the loop, after which every generated test was blamed for a compilation error that
+     * predated the run - at minutes of AI time per unit.
+     */
+    @Test
+    void aModuleThatDoesNotBuildIsRefusedBeforeGeneratingAnything(@TempDir Path stateDir) {
+        StubUnitProcessor processor = new StubUnitProcessor().thenKeeps("newTest");
+        FakeModuleBuild build = new FakeModuleBuild().fullSuiteBuildFails("""
+                [INFO] Compiling 127 source files
+                [ERROR] MarcheToMarcheEntityMapperTest.java:[130,13] reference to assertEquals is ambiguous
+                [ERROR] -> [Help 1]
+                """);
+
+        GenerateResult result = engine(processor, build, store(stateDir)).run(stateWithUnits(1), contextLookup());
+
+        assertThat(result.exitReason()).isEqualTo(GenerateResult.ExitReason.PREFLIGHT_FAILED);
+        assertThat(processor.invocations()).isZero();
+        assertThat(result.fullSuiteFailures())
+                .anySatisfy(line -> assertThat(line).contains("assertEquals is ambiguous"))
+                .noneSatisfy(line -> assertThat(line).contains("[Help 1]"));
+    }
+
+    @Test
+    void aBuildThatBreaksDuringTheRunIsReportedAtTheEnd(@TempDir Path stateDir) {
+        StubUnitProcessor processor = new StubUnitProcessor().thenKeeps("newTest");
+        FakeModuleBuild build = new FakeModuleBuild()
+                .fullSuiteGreen(1)
+                .fullSuiteBuildFails("[ERROR] something stopped compiling");
+
+        GenerateResult result = engine(processor, build, store(stateDir)).run(stateWithUnits(1), contextLookup());
+
+        assertThat(result.exitReason()).isEqualTo(GenerateResult.ExitReason.FULL_SUITE_RED);
+        assertThat(result.fullSuiteFailures())
+                .anySatisfy(line -> assertThat(line).contains("stopped compiling"));
+    }
+
     @Test
     void aRunWhereEveryUnitFailsReportsThatNothingWasKept(@TempDir Path stateDir) {
         StubUnitProcessor processor = new StubUnitProcessor()
@@ -279,6 +317,22 @@ class GenerateEngineTest {
         assertThat(processor.invocations()).isEqualTo(2);
     }
 
+    @Test
+    void progressReportsEachUnitsStartWithAnIndexAndItsOutcomeAtTheEnd(@TempDir Path stateDir) {
+        List<String> progress = new ArrayList<>();
+        StubUnitProcessor processor = new StubUnitProcessor()
+                .thenKeeps("newTest")
+                .thenFails(UnitStatus.DISCARDED_NO_VALUE, "no value");
+
+        engineWithProgress(processor, new FakeModuleBuild().fullSuiteGreen(2), store(stateDir), progress::add)
+                .run(stateWithUnits(2), contextLookup());
+
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("[1/2]"));
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("[2/2]"));
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("DONE"));
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("DISCARDED_NO_VALUE"));
+    }
+
     // --- fixtures ---------------------------------------------------------------------
 
     private GenerateEngine engine(UnitProcessor processor, FakeModuleBuild build, StateStore store) {
@@ -302,6 +356,13 @@ class GenerateEngineTest {
                                                      StateStore store, ContextKeyStabilityTracker tracker) {
         return new GenerateEngine(processor, build, store,
                 new ExecutionConfig(null, null, null, null, null), tracker);
+    }
+
+    private GenerateEngine engineWithProgress(UnitProcessor processor, FakeModuleBuild build, StateStore store,
+                                              java.util.function.Consumer<String> progress) {
+        return new GenerateEngine(processor, build, store,
+                new ExecutionConfig(null, null, null, null, null),
+                new ContextKeyStabilityTracker(Integer.MAX_VALUE), progress);
     }
 
     private StateStore store(Path stateDir) {

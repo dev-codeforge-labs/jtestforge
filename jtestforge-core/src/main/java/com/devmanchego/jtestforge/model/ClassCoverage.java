@@ -56,4 +56,21 @@ public record ClassCoverage(
                 .sorted()
                 .toList();
     }
+
+    /**
+     * Line numbers within {@code [fromLineInclusive, toLineInclusive]} that executed but
+     * took only one of two-or-more branch outcomes - a method can legitimately have zero
+     * {@link #uncoveredLineNumbers} yet still be selected as a work unit
+     * ({@code WorkUnitDiscovery.hasUncoveredLinesOrBranches}) for exactly these lines, and
+     * without this, the model is told nothing reached and nothing else, which cannot be
+     * acted on. Feeds {@code {{UNCOVERED_BRANCHES}}} (§6.1).
+     */
+    public List<Integer> partiallyCoveredBranchLineNumbers(int fromLineInclusive, int toLineInclusive) {
+        return lines.entrySet().stream()
+                .filter(entry -> entry.getKey() >= fromLineInclusive && entry.getKey() <= toLineInclusive)
+                .filter(entry -> entry.getValue().isPartiallyCoveredBranch())
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+    }
 }

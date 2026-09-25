@@ -312,7 +312,7 @@ final class FixtureModuleHarness {
     private JTestForgeConfig defaultConfig() {
         return new JTestForgeConfig(
                 new com.devmanchego.jtestforge.config.ProjectConfig(
-                        moduleDir.toString(), "mvn", MAVEN_ARGS, null, null, null, null, null),
+                        moduleDir.toString(), "mvn", MAVEN_ARGS, null, null, null, null, null, null, null, null),
                 new com.devmanchego.jtestforge.config.SelectionConfig(
                         null, null, null, null, null, null, null),
                 null, null,

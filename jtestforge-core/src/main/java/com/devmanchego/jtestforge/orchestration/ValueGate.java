@@ -29,6 +29,11 @@ public final class ValueGate {
         this.config = Objects.requireNonNull(config, "config");
     }
 
+    /** Whether a coverage/branch gain is actually required to keep a candidate - see {@link GenerateConfig}. */
+    public boolean requireCoverageGain() {
+        return config.requireCoverageGain();
+    }
+
     /**
      * @param gapsAssertedByTheNewTests the unit's gaps whose required assertion shape the
      *                                  newly-kept tests actually demonstrate - measured

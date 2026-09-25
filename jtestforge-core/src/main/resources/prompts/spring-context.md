@@ -1,5 +1,10 @@
 # Verify the wiring `{{CLASS_FQN}}` performs
 
+_No tools here: every file read, directory listing, search or shell command is
+refused and only delays your answer. Everything that exists for this task is
+below. If some detail is missing, stub it with the libraries listed as available
+and carry on — do not go looking. Emit nothing outside the two fenced blocks._
+
 The behaviour of this class *is* its wiring: which beans exist, and under which conditions.
 That is decided by Spring when the context is built, so no direct call to any method here
 can observe it.

@@ -32,7 +32,7 @@ class ConfigHasherTest {
 
     private JTestForgeConfig minimalConfig(String modulePath) {
         return new JTestForgeConfig(
-                new ProjectConfig(modulePath, null, null, null, null, null, null, null),
+                new ProjectConfig(modulePath, null, null, null, null, null, null, null, null, null, null),
                 null, null, null, null, null, null, null, null);
     }
 }
