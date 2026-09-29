@@ -232,7 +232,7 @@ final class GenerateRunner {
                 provider,
                 new TranscriptWriter(stateDir, progress, verboseSink),
                 new UnitPromptFactory(new PromptTemplateLoader().load(config.prompts(), configBaseDir),
-                        new PromptRenderer(config.context().maxPromptChars()),
+                        new PromptRenderer(effectiveMaxPromptChars(providerId)),
                         new ContextAssembler(config.context())),
                 new ResponseParser(),
                 new StaticQualityGuards(config.generate(), config.spring()),
@@ -255,6 +255,18 @@ final class GenerateRunner {
 
         GenerateEngine engine = new GenerateEngine(processor, moduleBuild, stateStore, executionConfig, tracker, progress);
         return engine.run(initialState, workUnit -> contextFor(byUnitId, workUnit), restriction);
+    }
+
+    /**
+     * {@code aiProvider.providers.<id>.maxPromptChars} when set, else the global
+     * {@code context.maxPromptChars} - a locally hosted model can need a far smaller (or
+     * larger) context budget than a hosted CLI, and that is a property of the provider.
+     */
+    private int effectiveMaxPromptChars(String providerId) {
+        com.devmanchego.jtestforge.config.ProviderConfig providerConfig =
+                config.aiProvider().providers().get(providerId);
+        Integer override = providerConfig == null ? null : providerConfig.maxPromptChars();
+        return override != null ? override : config.context().maxPromptChars();
     }
 
     /**

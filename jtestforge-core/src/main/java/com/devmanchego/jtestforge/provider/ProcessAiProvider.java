@@ -17,8 +17,9 @@ import java.util.Objects;
 
 /**
  * Talks to an AI CLI as a child process — jtestforge-specification.md §12.1, §12.2. A
- * single implementation covers both Claude CLI and Gemini CLI; they differ only in
- * {@code command}, {@code args} and {@code promptDelivery}.
+ * single implementation covers any non-interactive AI CLI (Claude Code, Gemini CLI,
+ * Codex CLI, Ollama, ...); they differ only in {@code command}, {@code args} and
+ * {@code promptDelivery}.
  *
  * <p>Retries apply to <b>transport failures only</b> - a non-zero exit, a timeout, or
  * empty stdout. A well-formed but useless answer is never retried here; that is the

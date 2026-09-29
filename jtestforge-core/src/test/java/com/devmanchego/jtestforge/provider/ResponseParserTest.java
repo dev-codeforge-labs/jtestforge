@@ -572,6 +572,38 @@ class ResponseParserTest {
                         .containsExactly("static org.junit.jupiter.api.Assertions.*"));
     }
 
+    /**
+     * Found against a real AI CLI (Codex CLI): asked for a bare import path, it wrote a
+     * specific static member - {@code org.junit.jupiter.api.Assertions.assertTrue} -
+     * without the {@code static} keyword. Left unqualified this merges into a plain
+     * {@code import org.junit.jupiter.api.Assertions.assertTrue;}, which javac rejects
+     * ({@code assertTrue} is a method, not a nested type) - a full run against the fixture
+     * module reproduced exactly this compile failure before this test was added.
+     */
+    @Test
+    void aBareStaticMemberImportMissingTheStaticKeywordIsQualified() {
+        String response = """
+                ```imports
+                org.junit.jupiter.api.Assertions.assertTrue
+                org.junit.jupiter.api.Assertions.assertSame
+                ```
+
+                ```java
+                @Test
+                void t() {
+                    assertTrue(true);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.candidates()).singleElement().satisfies(candidate ->
+                assertThat(candidate.requiredImports()).containsExactly(
+                        "static org.junit.jupiter.api.Assertions.assertTrue",
+                        "static org.junit.jupiter.api.Assertions.assertSame"));
+    }
+
     @Test
     void aNonWildcardImportAlwaysPassesThroughUnchanged() {
         String response = """

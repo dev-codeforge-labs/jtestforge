@@ -204,9 +204,32 @@ public final class ResponseParser {
                                 + canonical + "; keeping this one would fail to resolve or collide with it"));
                 continue;
             }
-            kept.add(importLine);
+            kept.add(qualifyBareStaticMemberImport(importLine, simpleName));
         }
         return kept;
+    }
+
+    /**
+     * Found against a real AI CLI (Codex CLI): asked for a bare import path, it wrote a
+     * specific (non-wildcard) static member - {@code org.junit.jupiter.api.Assertions
+     * .assertTrue} - without the {@code static} keyword the wildcard branch above already
+     * knows to restore. Left alone, {@link com.devmanchego.jtestforge.analysis.TestClassMerger}
+     * turns that into a plain {@code import org.junit.jupiter.api.Assertions.assertTrue;},
+     * which javac rejects outright: {@code assertTrue} is a method, not a nested type of
+     * {@code Assertions}, so a non-static import can never name it.
+     *
+     * <p>A trailing segment that starts lower-case can only be a method or field - Java
+     * type names are always upper-case by convention, and every type this tool ever
+     * imports (production classes, DTOs, exceptions, JUnit/Mockito/AssertJ types) follows
+     * it. Bare {@code java.math.BigDecimal}-shaped class imports are therefore never
+     * touched; only a member reference gets {@code static} restored, exactly as the
+     * wildcard branch already restores it for {@code Foo.*}.
+     */
+    private String qualifyBareStaticMemberImport(String importLine, String simpleName) {
+        if (importLine.startsWith("static ") || simpleName.isEmpty() || !Character.isLowerCase(simpleName.charAt(0))) {
+            return importLine;
+        }
+        return "static " + importLine;
     }
 
     /**

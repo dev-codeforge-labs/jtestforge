@@ -5,8 +5,9 @@ import java.time.Duration;
 /**
  * A source of AI-generated text — jtestforge-specification.md §12.1.
  *
- * <p>A single {@link ProcessAiProvider} implementation covers both Claude CLI and
- * Gemini CLI; they differ only in configuration. The SPI exists so a future in-process
+ * <p>A single {@link ProcessAiProvider} implementation covers any non-interactive AI CLI
+ * (Claude Code, Gemini CLI, Codex CLI, Ollama, ...); they differ only in configuration.
+ * The SPI exists so a future in-process
  * or HTTP provider can be added without touching the orchestration layer, and so tests
  * can inject {@link RecordedAiProvider} instead of a real CLI.
  */

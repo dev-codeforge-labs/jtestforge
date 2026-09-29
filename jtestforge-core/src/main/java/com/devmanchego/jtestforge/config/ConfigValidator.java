@@ -205,6 +205,11 @@ public final class ConfigValidator {
             requirePositive(errors,
                     "aiProvider.providers." + entry.getKey() + ".timeoutSeconds",
                     entry.getValue().timeoutSeconds());
+            Integer maxPromptChars = entry.getValue().maxPromptChars();
+            if (maxPromptChars != null) {
+                requirePositive(errors,
+                        "aiProvider.providers." + entry.getKey() + ".maxPromptChars", maxPromptChars);
+            }
         }
     }
 
