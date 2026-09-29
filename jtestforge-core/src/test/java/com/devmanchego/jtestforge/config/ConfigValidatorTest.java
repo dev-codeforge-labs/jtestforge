@@ -54,13 +54,39 @@ class ConfigValidatorTest {
     void theActiveProviderCommandMustBeResolvable() throws Exception {
         JTestForgeConfig base = fullyValidConfig();
         Map<String, ProviderConfig> providers = Map.of("claude",
-                new ProviderConfig("definitely-not-a-real-command-xyz", null, null, null, null, null));
+                new ProviderConfig("definitely-not-a-real-command-xyz", null, null, null, null, null, null));
         JTestForgeConfig config = withAiProvider(base, new AiProviderConfig("claude", providers, null));
 
         ValidationResult result = validator.validate(config, validContext());
 
         assertThat(result.errors()).extracting(ConfigViolation::path)
                 .anyMatch(p -> p.startsWith("aiProvider.providers.claude.command"));
+    }
+
+    @Test
+    void aProvidersMaxPromptCharsOverrideMustBePositiveWhenSet() throws Exception {
+        JTestForgeConfig base = fullyValidConfig();
+        Map<String, ProviderConfig> providers = Map.of("claude",
+                new ProviderConfig(resolvableCommand(), null, null, null, null, null, 0));
+        JTestForgeConfig config = withAiProvider(base, new AiProviderConfig("claude", providers, null));
+
+        ValidationResult result = validator.validate(config, validContext());
+
+        assertThat(result.errors()).extracting(ConfigViolation::path)
+                .contains("aiProvider.providers.claude.maxPromptChars");
+    }
+
+    @Test
+    void aProvidersMaxPromptCharsOverrideIsOptional() throws Exception {
+        JTestForgeConfig base = fullyValidConfig();
+        Map<String, ProviderConfig> providers = Map.of("claude",
+                new ProviderConfig(resolvableCommand(), null, null, null, null, null, 8000));
+        JTestForgeConfig config = withAiProvider(base, new AiProviderConfig("claude", providers, null));
+
+        ValidationResult result = validator.validate(config, validContext());
+
+        assertThat(result.errors()).extracting(ConfigViolation::path)
+                .doesNotContain("aiProvider.providers.claude.maxPromptChars");
     }
 
     @Test
@@ -219,7 +245,7 @@ class ConfigValidatorTest {
                 new ProjectConfig(moduleDir.toString(), null, null, null, null, null, null, null, null, null, null),
                 null,
                 new AiProviderConfig("claude", Map.of(
-                        "claude", new ProviderConfig(resolvableCommand(), null, null, null, null, null)), null),
+                        "claude", new ProviderConfig(resolvableCommand(), null, null, null, null, null, null)), null),
                 null,
                 new SpringConfig(SpringEnabledMode.DISABLED, null, null, null, null, null, null, null, null, null, null),
                 null, null, null, null);

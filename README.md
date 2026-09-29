@@ -2,7 +2,8 @@
 
 JTestForge is a Java 21 command-line tool that raises the **quality** of a Maven
 module's JUnit 5 test suite — plain Mockito unit tests and Spring unit/slice tests —
-by driving an external AI CLI (Claude CLI, Gemini CLI) in a closed, verified loop.
+by driving an external AI CLI (Claude CLI, Gemini CLI, GitHub Copilot CLI, or any other
+non-interactive AI CLI you configure) in a closed, verified loop.
 
 It is not "ask a model for a test." Every candidate is compiled, run, and measured
 before it is kept:
@@ -38,7 +39,8 @@ Full detail on every command, flag, exit code and config option is in
 
 - Java 21
 - The target project: a Maven module (a `pom.xml`) that builds green before a run
-- An AI CLI on `PATH` for `generate` — `claude` or `gemini` by default
+- An AI CLI on `PATH` for `generate` — `claude`, `gemini`, `copilot` or `codex`, all
+  verified; see [usage.md](usage.md#ai-providers) for how to add another
 
 ## Building
 
@@ -87,7 +89,7 @@ invocation reconciles against what's actually on disk before continuing.
 eligible, the AI provider and its invocation shape, which Spring test tiers are
 allowed, context-injection limits, and the acceptance thresholds for `generate` and
 `harden`. See [usage.md](usage.md#configuration) for the annotated reference, or
-[jtestforge-specification.md](jtestforge-specification.md) §5 for the complete spec.
+[jtestforge-specification.md](.private/jtestforge-specification.md) §5 for the complete spec.
 
 ## Project layout
 
@@ -98,9 +100,9 @@ allowed, context-injection limits, and the acceptance thresholds for `generate` 
 
 ## Design documents
 
-- [jtestforge-specification.md](jtestforge-specification.md) — the full functional and
-  technical specification.
-- [jtestforge-implementation-plan.md](jtestforge-implementation-plan.md) — the
+- [jtestforge-specification.md](.private/jtestforge-specification.md) — the full functional
+  and technical specification.
+- [jtestforge-implementation-plan.md](.private/jtestforge-implementation-plan.md) — the
   phase-by-phase build log, including what each phase verified and any real defects it
   found along the way.
 

@@ -181,6 +181,22 @@ final class FixtureModuleHarness {
      */
     GenerateResult runGenerate(AiProvider provider, TierRestriction restriction,
                                ContextKeyStabilityTracker tracker, int maxUnitsPerRun) {
+        return runGenerate(provider, restriction, tracker, maxUnitsPerRun,
+                Duration.ofSeconds(60), config.context().maxPromptChars());
+    }
+
+    /**
+     * @param providerTimeout per-invocation timeout, e.g. a much longer one for a slow
+     *                        locally hosted model than the 60s default used for a fast
+     *                        hosted CLI in the other overload
+     * @param maxPromptChars  the effective per-provider value (§5's
+     *                        {@code aiProvider.providers.*.maxPromptChars}, falling back
+     *                        to the global default) - not read from {@code config} here
+     *                        since the harness's own config knows nothing about providers
+     */
+    GenerateResult runGenerate(AiProvider provider, TierRestriction restriction,
+                               ContextKeyStabilityTracker tracker, int maxUnitsPerRun,
+                               Duration providerTimeout, int maxPromptChars) {
         List<DiscoveredUnit> discovered = discoverUnits();
         Map<String, DiscoveredUnit> byUnitId = new LinkedHashMap<>();
         for (DiscoveredUnit unit : discovered) {
@@ -201,7 +217,7 @@ final class FixtureModuleHarness {
                 provider,
                 new TranscriptWriter(stateDir),
                 new UnitPromptFactory(new PromptTemplateLoader().loadBundled(),
-                        new PromptRenderer(config.context().maxPromptChars()),
+                        new PromptRenderer(maxPromptChars),
                         new ContextAssembler(config.context())),
                 new ResponseParser(),
                 new StaticQualityGuards(config.generate(), config.spring()),
@@ -211,7 +227,7 @@ final class FixtureModuleHarness {
                 new CoverageAndGapAcceptanceGate(moduleBuild, new CoverageDeltaCalculator(),
                         new ValueGate(config.generate())),
                 config.generate(),
-                Duration.ofSeconds(60),
+                providerTimeout,
                 springSupport);
 
         ExecutionConfig executionConfig = maxUnitsPerRun > 0

@@ -1,7 +1,9 @@
 # JTestForge — Usage Guide
 
 JTestForge is a Java 21 command-line tool that raises the quality of a Maven module's
-test suite by driving an external AI CLI (Claude Code, Gemini CLI) in a verified loop: it
+test suite by driving an external AI CLI (Claude Code, Gemini CLI, GitHub Copilot CLI, or
+any other non-interactive AI CLI you configure - see [AI providers](#ai-providers)) in a
+verified loop: it
 proposes a test, compiles it, runs it, measures whether coverage actually improved, and
 only keeps what earns its place.
 
@@ -22,8 +24,8 @@ only keeps what earns its place.
 - Java 21.
 - The target project must be a Maven module (a directory with a `pom.xml`) that **builds
   green** before a run — JTestForge never starts from a red baseline.
-- An AI CLI on `PATH` for `generate` (`claude` or `gemini.cmd` by default — see
-  [Configuration](#configuration)). Not required for `init`, `scan`, `status`, `clean` or
+- An AI CLI on `PATH` for `generate` (`claude`, `gemini.cmd` or `copilot` — see
+  [AI providers](#ai-providers)). Not required for `init`, `scan`, `status`, `clean` or
   `report`.
 
 ## Building and running
@@ -318,11 +320,67 @@ block (`maxTestsPerMethod`, `maxRepairAttempts`, ...) are all live and consumed 
 `generate` today. The `harden` block (`minMutationScore`, `maxTierForMutation`, ...) is
 present in the scaffolded file but not yet consumed by anything, pending implementation
 phase 20. API keys for the AI CLI are **never** read from this file — they are inherited
-from the process environment, exactly as the underlying CLI (`claude`, `gemini`) itself
-expects.
+from the process environment, exactly as the underlying CLI (`claude`, `gemini`,
+`copilot`) itself expects.
 
 See `jtestforge-specification.md` §5 for the full config reference and validation rules,
 and §14 for the complete command/exit-code specification this CLI is built against.
+
+---
+
+## AI providers
+
+`ProcessAiProvider` (jtestforge-specification.md §12.1) covers **any non-interactive AI
+CLI** — the differences between providers are entirely in `jtestforge.yaml`'s
+`aiProvider.providers.<id>` block (`command`, `args`, `promptDelivery`, `timeoutSeconds`,
+`transportRetries`, `env`, and an optional per-provider `maxPromptChars` override), never
+in JTestForge's own code. `aiProvider.active` (or `-p/--provider` for one invocation)
+picks which entry runs.
+
+### Providers verified against a real generation run
+
+Each of these has actually produced kept tests against the project's fixture module
+(`jtestforge-implementation-plan.md`'s "tuning loop") — not just a smoke test:
+
+| Provider | `command` | Notes |
+|---|---|---|
+| `claude` (default) | `claude` | The primary provider this tool was built and tuned against - two full tuning-loop passes (implementation phase 19) found and fixed real `ResponseParser` gaps. |
+| `gemini` | `gemini.cmd` | Prompt delivered on stdin with an empty `-p` argument - see the comment in the bundled `jtestforge.yaml.template` for why, and for the `.gemini/policies` setup that disables its tools outright. |
+| `copilot` | `copilot` (GitHub Copilot CLI) | Verified 2026-09: response contract held exactly, including a static-import line written as a full `import static ...` statement instead of the bare form the prompt asks for - already handled by the existing import-normalisation logic. Two Spring `WEB_SLICE` tests were correctly rejected by the pre-existing `BARE_STATUS` quality guard (status-code-only assertions), which is the guard doing its job, not a defect. `--available-tools` with no values is Copilot's equivalent of Gemini's tool-deny policy file: it denies every tool outright, so `--allow-all-tools` (required by the CLI for non-interactive mode) has nothing left to approve. |
+| `codex` | `codex exec` (OpenAI Codex CLI) | Verified 2026-09 - and found a real bug the first time round: Codex wrote a bare static-member import (`org.junit.jupiter.api.Assertions.assertTrue`) without the `static` keyword the wildcard-import handling already knew to restore for `Foo.*` forms. Merged as a plain (non-static) import, that doesn't compile - `assertTrue` is a method, not a nested type. Fixed in `ResponseParser` (any bare import whose last segment starts lower-case is now treated as a static member, the same convention every type name in this codebase already follows) and covered by a regression test; a second real pass afterward completed clean. `--sandbox read-only` denies the model's own tool calls at the OS level, on top of `isolateWorkingDirectory`; `--skip-git-repo-check` is required because `ai-cwd` is deliberately not a git repository; `--color never` keeps stdout free of ANSI escapes. Codex's banner, prompt echo and token-usage stats go to stderr, not stdout. |
+
+A provider not in this table isn't necessarily broken — it just hasn't been run for real
+yet. A local Ollama model is next once it's installed, and is the most likely case to
+actually need the per-provider `maxPromptChars` override, since its context window can be
+far smaller than a hosted CLI's.
+
+### Adding and verifying a new provider
+
+1. Add an entry under `aiProvider.providers.<id>` in your `jtestforge.yaml` (or in
+   `jtestforge-core/src/main/resources/jtestforge.yaml.template` if it's going in
+   permanently) with that CLI's `command`/`args`/`promptDelivery`.
+2. Before trusting it for a real module, verify it the same way every provider above was
+   verified: add a `ProviderProfile` entry to `TuningLoopRunner.KNOWN_PROVIDERS`
+   (`jtestforge-core/src/test/java/.../e2e/TuningLoopRunner.java`) and run it against the
+   checked-in fixture module (this talks to the real CLI/network and spends real
+   invocations):
+   ```bash
+   cd jtestforge-core
+   mvn -o test-compile org.codehaus.mojo:exec-maven-plugin:3.1.0:java \
+       -Dexec.mainClass=com.devmanchego.jtestforge.e2e.TuningLoopRunner \
+       -Dexec.classpathScope=test -Dprovider=<id>
+   ```
+   Add `-DmaxPromptChars=<n>` to try a smaller context budget than the 60000-character
+   default. The run prints a per-unit report and leaves every prompt/response transcript
+   on disk (path printed at the end) for reading.
+3. Read the transcripts. Two questions matter: did the response keep to the two-fenced-
+   block contract (§6.2), and did anything the model wrote need a new tolerance in
+   `ResponseParser` (as happened twice for Claude in phase 19)? A candidate test being
+   discarded by an existing quality guard is not itself a reason to add tolerances - the
+   guard rejecting a bad test is it working correctly.
+4. Only once that's clean, add the provider to `jtestforge.yaml.template` for real (see
+   the `claude`/`gemini`/`copilot` entries there for the pattern), and add it to
+   `InitCommand.KNOWN_PROVIDERS` so `jtestforge init --provider <id>` can scaffold it.
 
 ---
 

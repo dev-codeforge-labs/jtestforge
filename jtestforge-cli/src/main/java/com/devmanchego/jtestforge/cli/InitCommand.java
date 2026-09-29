@@ -6,6 +6,7 @@ import com.devmanchego.jtestforge.prompt.PromptTemplateLoader;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Model.CommandSpec;
+import picocli.CommandLine.Option;
 import picocli.CommandLine.Spec;
 
 import java.io.IOException;
@@ -14,6 +15,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.Callable;
 
 /**
@@ -33,9 +35,16 @@ import java.util.concurrent.Callable;
 public final class InitCommand implements Callable<Integer> {
 
     private static final String BUNDLED_CONFIG_TEMPLATE = "jtestforge.yaml.template";
+    /** Provider blocks the bundled template actually defines under {@code aiProvider.providers}. */
+    private static final List<String> KNOWN_PROVIDERS = List.of("claude", "gemini", "copilot", "codex");
+    private static final String DEFAULT_ACTIVE_PROVIDER_LINE = "  active: claude";
 
     @Mixin
     private CommonModuleOptions options;
+
+    @Option(names = "--provider", description = "Provider to set as aiProvider.active in a freshly "
+            + "scaffolded config: " + "${COMPLETION-CANDIDATES}. Only affects a config that does not exist yet.")
+    private String provider;
 
     @Spec
     private CommandSpec spec;
@@ -43,12 +52,23 @@ public final class InitCommand implements Callable<Integer> {
     @Override
     public Integer call() {
         ConsoleOutput console = console();
+
+        if (provider != null && !KNOWN_PROVIDERS.contains(provider)) {
+            console.error("Unknown --provider \"" + provider + "\" - the bundled config template only defines "
+                    + KNOWN_PROVIDERS + " under aiProvider.providers. Scaffold with a known provider, then add "
+                    + "your own block under aiProvider.providers by hand.");
+            return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
+        }
+
         Path configPath = targetConfigPath();
 
-        boolean configWritten = writeIfAbsent(configPath, InitCommand::bundledConfigTemplate, console);
+        boolean configWritten = writeIfAbsent(configPath, this::configTemplateContent, console);
         console.info(configWritten
                 ? "Wrote " + configPath
                 : configPath + " already exists; left untouched.");
+        if (!configWritten && provider != null) {
+            console.warn("--provider was given but " + configPath + " already exists; left untouched.");
+        }
 
         Path promptsBaseDir = configPath.toAbsolutePath().getParent();
         PromptTemplateLoader templateLoader = new PromptTemplateLoader();
@@ -97,6 +117,19 @@ public final class InitCommand implements Callable<Integer> {
             console.error("Failed to write " + target + ": " + e.getMessage());
             throw new UncheckedIOException(e);
         }
+    }
+
+    /** Applies {@code --provider} to the bundled template's {@code aiProvider.active} line, if given. */
+    private String configTemplateContent() {
+        String template = bundledConfigTemplate();
+        if (provider == null) {
+            return template;
+        }
+        if (!template.contains(DEFAULT_ACTIVE_PROVIDER_LINE)) {
+            throw new IllegalStateException(
+                    "Bundled config template no longer contains \"" + DEFAULT_ACTIVE_PROVIDER_LINE + "\"");
+        }
+        return template.replace(DEFAULT_ACTIVE_PROVIDER_LINE, "  active: " + provider);
     }
 
     private static String bundledConfigTemplate() {

@@ -65,9 +65,54 @@ class InitCommandTest {
         assertThat(Files.readString(rules)).isEqualTo(edited);
     }
 
+    @Test
+    void withoutProviderTheScaffoldedConfigDefaultsToClaude(@TempDir Path dir) {
+        int exitCode = run(dir);
+
+        assertThat(exitCode).isEqualTo(0);
+        assertThat(readSafely(dir.resolve("jtestforge.yaml"))).contains("active: claude");
+    }
+
+    @Test
+    void aKnownProviderIsWrittenAsTheActiveOne(@TempDir Path dir) {
+        int exitCode = runWithProvider(dir, "gemini");
+
+        assertThat(exitCode).isEqualTo(0);
+        assertThat(readSafely(dir.resolve("jtestforge.yaml"))).contains("active: gemini");
+    }
+
+    @Test
+    void copilotIsAlsoAKnownProvider(@TempDir Path dir) {
+        int exitCode = runWithProvider(dir, "copilot");
+
+        assertThat(exitCode).isEqualTo(0);
+        assertThat(readSafely(dir.resolve("jtestforge.yaml"))).contains("active: copilot");
+    }
+
+    @Test
+    void codexIsAlsoAKnownProvider(@TempDir Path dir) {
+        int exitCode = runWithProvider(dir, "codex");
+
+        assertThat(exitCode).isEqualTo(0);
+        assertThat(readSafely(dir.resolve("jtestforge.yaml"))).contains("active: codex");
+    }
+
+    @Test
+    void anUnknownProviderFailsWithAClearMessage(@TempDir Path dir) {
+        int exitCode = runWithProvider(dir, "not-a-real-provider");
+
+        assertThat(exitCode).isNotEqualTo(0);
+        assertThat(dir.resolve("jtestforge.yaml")).doesNotExist();
+    }
+
     private int run(Path dir) {
         CommandLine commandLine = new CommandLine(new InitCommand());
         return commandLine.execute("--module", dir.toString());
+    }
+
+    private int runWithProvider(Path dir, String provider) {
+        CommandLine commandLine = new CommandLine(new InitCommand());
+        return commandLine.execute("--module", dir.toString(), "--provider", provider);
     }
 
     private String readSafely(Path file) {

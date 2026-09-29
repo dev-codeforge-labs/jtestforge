@@ -79,6 +79,10 @@ aiProvider:
       timeoutSeconds: 300
       # Retries for transport failures only (non-zero exit, timeout, empty output).
       transportRetries: 2
+      # Overrides context.maxPromptChars for this provider only. Empty: use the global
+      # value below. Set this per provider when its context window differs from the
+      # others - a locally hosted model routinely has a far smaller one than a hosted CLI.
+      # maxPromptChars:
     gemini:
       command: gemini.cmd
       # An empty -p value switches gemini to non-interactive mode without putting the
@@ -103,14 +107,48 @@ aiProvider:
       #   DEBUG: "1"                              # the CLI logs what it is doing; its
       #                                           # stderr is kept per attempt in
       #                                           # <stateDir>/transcripts/<unit>/N.stderr.log
+    # GitHub Copilot CLI. Verified against the fixture module (jtestforge-implementation-
+    # plan.md, tuning loop): the response contract, the imports-block normalisation and
+    # the BARE_STATUS quality guard all held with no ResponseParser changes needed.
+    copilot:
+      command: copilot
+      # --allow-all-tools is required by the CLI itself for non-interactive mode (-p),
+      # even though isolateWorkingDirectory (and --available-tools with no values, which
+      # disables every tool outright - see the PERFORMANCE note below) leave it nothing
+      # to approve. -s (silent) keeps stdout to just the agent's answer, which is what
+      # the response contract (§6.2) needs; anything it logs instead goes to stderr.
+      args: ["--allow-all-tools", "--available-tools", "-s", "--log-level", "error"]
+      promptDelivery: stdin        # stdin | argument | file
+      timeoutSeconds: 300
+      transportRetries: 2
+    # OpenAI Codex CLI. Verified against the fixture module the same way as the providers
+    # above; the first pass found a real ResponseParser gap (a bare static-member import
+    # missing the `static` keyword, e.g. org.junit.jupiter.api.Assertions.assertTrue) that
+    # is now fixed and covered by a regression test - see ResponseParser's javadoc.
+    codex:
+      command: codex
+      # exec is Codex's non-interactive subcommand; without --skip-git-repo-check it
+      # refuses to run outside a git repository, which the isolated ai-cwd deliberately
+      # is not. --sandbox read-only denies file writes and network/shell access for the
+      # model's own tool calls - belt and suspenders alongside isolateWorkingDirectory,
+      # since rules.md already tells the model not to use any tool. --color never keeps
+      # stdout free of ANSI escapes. The banner, prompt echo and token-usage stats Codex
+      # prints go to STDERR, not stdout - stdout is exactly the model's final answer, the
+      # same clean shape as claude/gemini/copilot.
+      args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never"]
+      promptDelivery: stdin        # stdin | argument | file
+      timeoutSeconds: 300
+      transportRetries: 2
   # API keys are NEVER read from this file. They are inherited from the process
   # environment, exactly as the CLI itself expects them.
   #
-  # PERFORMANCE, for an agentic CLI (Gemini CLI, Claude Code, ...): its tools are pure
-  # latency here, because every piece of context the model needs is already in the
-  # prompt. isolateWorkingDirectory above removes anything worth exploring; turning the
-  # tools off outright is the CLI's own configuration. For the Gemini CLI, put this in
-  # <home>/.gemini/policies/jtestforge.toml:
+  # PERFORMANCE, for an agentic CLI (Gemini CLI, Claude Code, GitHub Copilot CLI, ...):
+  # its tools are pure latency here, because every piece of context the model needs is
+  # already in the prompt. isolateWorkingDirectory above removes anything worth
+  # exploring; turning the tools off outright is the CLI's own configuration. The
+  # Copilot CLI provider above already does this with its own --available-tools flag
+  # (an empty list - "only these tools are available" - denies all of them); for the
+  # Gemini CLI, put this in <home>/.gemini/policies/jtestforge.toml:
   #
   #   [[rule]]
   #   toolName = "*"

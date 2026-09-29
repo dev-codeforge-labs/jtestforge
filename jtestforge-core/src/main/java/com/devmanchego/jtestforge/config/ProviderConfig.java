@@ -11,6 +11,11 @@ import java.util.Map;
  *            variables, but a corporate environment routinely needs some set - a config
  *            directory the user can actually write to, a proxy, a debug switch. API keys
  *            belong in the real environment, never in this file.
+ * @param maxPromptChars overrides {@code context.maxPromptChars} for this provider only.
+ *                       {@code null} means "use the global value" - most CLIs share one
+ *                       reasonable context budget, but a locally hosted model can have a
+ *                       far smaller (or larger) one than a hosted CLI, and that is a
+ *                       property of the provider, not of the run.
  */
 public record ProviderConfig(
         String command,
@@ -18,7 +23,8 @@ public record ProviderConfig(
         PromptDelivery promptDelivery,
         Integer timeoutSeconds,
         Integer transportRetries,
-        Map<String, String> env) {
+        Map<String, String> env,
+        Integer maxPromptChars) {
 
     public ProviderConfig {
         args = args == null ? List.of() : List.copyOf(args);
