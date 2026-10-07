@@ -334,7 +334,9 @@ final class FixtureModuleHarness {
                 null, null,
                 new SpringConfig(null, null, null, null, null, null, null, null, null, null, null),
                 new ContextConfig(null, null, null, null, null, null, null),
-                new GenerateConfig(null, null, null, null, null),
+                // -DrequireCoverageGain=true turns the coverage gate on for a manual tuning pass
+                new GenerateConfig(null, null, Boolean.getBoolean("requireCoverageGain") ? Boolean.TRUE : null,
+                        null, null),
                 null,
                 new ExecutionConfig(stateDir.toString(), null, null, null, null));
     }

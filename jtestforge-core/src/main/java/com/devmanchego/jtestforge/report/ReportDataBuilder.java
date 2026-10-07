@@ -30,7 +30,8 @@ public final class ReportDataBuilder {
 
     /** Statuses that mean a unit was never actually attempted - excluded from "attempted". */
     private static final Set<UnitStatus> NOT_ATTEMPTED_STATUSES = Set.of(
-            UnitStatus.PENDING, UnitStatus.SKIPPED_FILTERED, UnitStatus.SKIPPED_TIER_UNAVAILABLE);
+            UnitStatus.PENDING, UnitStatus.SKIPPED_FILTERED, UnitStatus.SKIPPED_TIER_UNAVAILABLE,
+            UnitStatus.SKIPPED_TEST_FILE_UNREADABLE);
 
     public ReportData build(RunState state) {
         List<WorkUnit> units = state.units();

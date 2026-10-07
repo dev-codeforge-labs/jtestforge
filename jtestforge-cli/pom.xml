@@ -115,10 +115,11 @@
                                     <mainClass>${jtestforge.mainClass}</mainClass>
                                 </transformer>
                                 <!--
-                                    Required: the AI-provider SPI and several dependencies
-                                    (JavaParser, SLF4J) rely on META-INF/services. Without
-                                    this transformer, shading silently drops all but one
-                                    provider's service file per interface.
+                                    Required: several dependencies (SLF4J/Logback, Jackson modules,
+                                    JavaParser) rely on META-INF/services. Without this
+                                    transformer, shading silently drops all but one service file
+                                    per interface. (JTestForge's own AI providers are NOT loaded
+                                    this way: GenerateCommand builds the provider directly.)
                                 -->
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
                             </transformers>

@@ -29,12 +29,12 @@ import java.util.Map;
  * the two rules require, so a fixture with no tier or class variation keeps discovery
  * order exactly.
  */
-final class TierScheduler {
+public final class TierScheduler {
 
     private TierScheduler() {
     }
 
-    static List<WorkUnit> order(List<WorkUnit> units) {
+    public static List<WorkUnit> order(List<WorkUnit> units) {
         Map<Tier, Map<String, List<WorkUnit>>> byTierThenClass = new LinkedHashMap<>();
         for (WorkUnit unit : units) {
             byTierThenClass

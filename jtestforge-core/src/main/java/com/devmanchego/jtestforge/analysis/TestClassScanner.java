@@ -45,9 +45,57 @@ public final class TestClassScanner implements TestFileInspector {
 
     private final JavaParser javaParser = new JavaParser(new ParserConfiguration()
             .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21));
+    private final java.nio.charset.Charset charset;
 
+    public TestClassScanner() {
+        this(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** @param charset the module's source encoding; a test file that is not valid in it is {@link TestFileScan.Unreadable} */
+    public TestClassScanner(java.nio.charset.Charset charset) {
+        this.charset = java.util.Objects.requireNonNull(charset, "charset");
+    }
+
+    /** The test class at {@code testFile}, if there is one and it could be read - see {@link #inspect}. */
     public Optional<TestClassInfo> scan(Path testFile) {
-        return parse(testFile).flatMap(compilationUnit -> toTestClassInfo(compilationUnit, testFile));
+        return inspect(testFile).parsedInfo();
+    }
+
+    /**
+     * Tells apart the three things a path can hold - see {@link TestFileScan}. A file only
+     * counts as {@link TestFileScan.Parsed} when it is valid UTF-8 and parses without a single
+     * problem: everything downstream (the merger, the reverter) rewrites the whole file from
+     * its AST, and doing that to a file that was only partly understood could corrupt it.
+     */
+    public TestFileScan inspect(Path testFile) {
+        if (!Files.isRegularFile(testFile)) {
+            return new TestFileScan.Absent();
+        }
+        String source;
+        try {
+            source = Files.readString(testFile, charset);
+        } catch (java.nio.charset.CharacterCodingException e) {
+            return new TestFileScan.Unreadable("it is not valid " + charset.name() + " - probably saved in "
+                    + "another encoding (set project.sourceEncoding, or fix the file)");
+        } catch (java.io.IOException e) {
+            return new TestFileScan.Unreadable("it could not be read: " + e.getMessage());
+        }
+        if (source.isBlank()) {
+            return new TestFileScan.Absent();
+        }
+        com.github.javaparser.ParseResult<CompilationUnit> result;
+        try {
+            result = javaParser.parse(source);
+        } catch (RuntimeException e) {
+            return new TestFileScan.Unreadable("JavaParser failed on it: " + e.getMessage());
+        }
+        if (!result.isSuccessful() || result.getResult().isEmpty()) {
+            return new TestFileScan.Unreadable("JavaParser could not parse it: " + result.getProblems().stream()
+                    .findFirst().map(problem -> problem.getMessage()).orElse("unknown syntax error"));
+        }
+        return toTestClassInfo(result.getResult().get(), testFile)
+                .<TestFileScan>map(TestFileScan.Parsed::new)
+                .orElseGet(() -> new TestFileScan.Unreadable("it declares no top-level class or interface"));
     }
 
     @Override
@@ -199,17 +247,4 @@ public final class TestClassScanner implements TestFileInspector {
         return Optional.empty();
     }
 
-    private Optional<CompilationUnit> parse(Path testFile) {
-        if (!Files.isRegularFile(testFile)) {
-            return Optional.empty();
-        }
-        try {
-            return javaParser.parse(testFile).getResult();
-        } catch (Exception e) {
-            // A test file that will not parse is not this class's problem to report: the
-            // build would already be failing, and callers treat "no info" as "nothing
-            // known about this file", which is the safe reading.
-            return Optional.empty();
-        }
-    }
 }

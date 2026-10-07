@@ -312,8 +312,25 @@ public final class ProcessRunner {
             return "";
         }
         return "  [env: " + environment.entrySet().stream()
-                .map(entry -> entry.getKey() + "=" + entry.getValue())
+                .map(entry -> entry.getKey() + "=" + displayValue(entry.getKey(), entry.getValue()))
                 .collect(java.util.stream.Collectors.joining(", ")) + "]";
+    }
+
+    /** Variables whose value is safe, and useful, to show - what the echo exists to let you check. */
+    private static final java.util.Set<String> VISIBLE_ENVIRONMENT_VARIABLES = java.util.Set.of(
+            "JAVA_HOME", "PATH", "DEBUG", "NO_COLOR", "TERM", "LANG", "LC_ALL");
+
+    /**
+     * {@code aiProvider.providers.*.env} is generic on purpose, and what people put in it is
+     * routinely a proxy URL with credentials or an API key. The name of every variable is
+     * shown - enough to see the override was sent - but its value only when it is one of the
+     * few known harmless ones (an allow-list: guessing which names "look secret" would leak
+     * the first one nobody thought of). {@code -v} output ends up pasted into bug reports.
+     */
+    private static String displayValue(String name, String value) {
+        boolean visible = VISIBLE_ENVIRONMENT_VARIABLES.contains(name.toUpperCase(java.util.Locale.ROOT))
+                || name.toUpperCase(java.util.Locale.ROOT).endsWith("_HOME");
+        return visible ? value : "***";
     }
 
     private void writeStdinAndClose(Process process, String stdin) {

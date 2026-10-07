@@ -14,7 +14,7 @@ import com.devmanchego.jtestforge.orchestration.GenerateResult;
 import com.devmanchego.jtestforge.orchestration.InterruptHandler;
 import com.devmanchego.jtestforge.orchestration.TierRestriction;
 import com.devmanchego.jtestforge.provider.AiProvider;
-import com.devmanchego.jtestforge.provider.ProcessAiProvider;
+import com.devmanchego.jtestforge.provider.AiProviderFactory;
 import com.devmanchego.jtestforge.state.LockFile;
 import com.devmanchego.jtestforge.state.LockHeldException;
 import picocli.CommandLine.Command;
@@ -63,6 +63,11 @@ public final class GenerateCommand implements Callable<Integer> {
 
     @Option(names = "--max-units", description = "Cap the number of units this invocation processes")
     private int maxUnits;
+
+    @Option(names = "--dry-run", description = "Do everything up to the AI call and stop: list the units a "
+            + "run would attempt and write each rendered prompt under <stateDir>/dry-run/. Nothing is generated, "
+            + "no test file is touched and the run state is left alone. Same as execution.dryRun: true")
+    private boolean dryRunFlag;
 
     @Option(names = "--force-unlock", description = "Clear a stale lock before running")
     private boolean forceUnlock;
@@ -161,8 +166,12 @@ public final class GenerateCommand implements Callable<Integer> {
             }
             return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
         }
+        if (providerConfig.isHttp() && !checkHttpProvider(console, providerId, providerConfig,
+                runner.effectiveMaxPromptChars(providerId))) {
+            return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
+        }
 
-        Thread hook = new InterruptHandler(runner.stateStore(), lock, new TestClassReverter(), modulePath).install();
+        Thread hook = new InterruptHandler(runner.stateStore(), lock, runner.testClassReverter(), modulePath).install();
         try {
             List<DiscoveredUnit> discovered;
             try {
@@ -174,13 +183,15 @@ public final class GenerateCommand implements Callable<Integer> {
                 return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
             }
             runner.moduleResolution().report(console);
-            AiProvider provider = new ProcessAiProvider(providerId,
+            if (dryRunFlag || config.execution().dryRun()) {
+                return printDryRun(console, runner.dryRun(discovered, providerId, tierRestriction(), maxUnits));
+            }
+            // An HTTP provider starts no process, so it needs no (isolated) working directory.
+            AiProvider provider = AiProviderFactory.create(providerId, providerConfig,
                     new com.devmanchego.jtestforge.util.ProcessRunner(
                             java.nio.charset.Charset.defaultCharset(), verboseSink, progress),
-                    providerConfig.command(), providerConfig.args(), providerConfig.promptDelivery(),
-                    providerConfig.transportRetries(),
-                    providerWorkingDirectory(console, config, modulePath, stateDir),
-                    providerConfig.env());
+                    providerConfig.isHttp() ? modulePath
+                            : providerWorkingDirectory(console, config, modulePath, stateDir));
             Duration providerTimeout = Duration.ofSeconds(providerConfig.timeoutSeconds());
             TierRestriction restriction = tierRestriction();
 
@@ -190,7 +201,7 @@ public final class GenerateCommand implements Callable<Integer> {
             printSummary(console, result);
             return ExitCodeMapper.forGenerate(result);
         } finally {
-            new InterruptHandler(runner.stateStore(), lock, new TestClassReverter(), modulePath).uninstall(hook);
+            new InterruptHandler(runner.stateStore(), lock, runner.testClassReverter(), modulePath).uninstall(hook);
         }
     }
 
@@ -215,6 +226,35 @@ public final class GenerateCommand implements Callable<Integer> {
                     + " (" + e.getMessage() + "); falling back to the module directory.");
             return modulePath;
         }
+    }
+
+    /**
+     * Before any unit: is the model server up, does it have the model, and does its context hold
+     * the prompts this run will build. One line at the top instead of every unit failing in turn
+     * and the run ending as "AI provider unreachable". Skipped for a process provider, which
+     * has nothing equivalent to ask.
+     *
+     * @return whether the run can go ahead
+     */
+    private boolean checkHttpProvider(ConsoleOutput console, String providerId,
+                                      com.devmanchego.jtestforge.config.ProviderConfig provider, int maxPromptChars) {
+        var result = new com.devmanchego.jtestforge.provider.HttpProviderPreflight().check(
+                provider.baseUrl(), provider.model(), provider.options(), provider.headers(), maxPromptChars);
+        result.notes().forEach(console::info);
+        result.warnings().forEach(warning -> console.warn("aiProvider.providers." + providerId + ": " + warning));
+        result.errors().forEach(error -> console.error("aiProvider.providers." + providerId + ": " + error));
+        return result.isUsable();
+    }
+
+    private Integer printDryRun(ConsoleOutput console, GenerateRunner.DryRunReport report) {
+        console.info("Dry run - nothing was generated, no test file was touched, no AI provider was called.");
+        console.info(report.wouldAttempt().size() + " unit(s) would be attempted, in this order:");
+        report.wouldAttempt().forEach(line -> console.info("  " + line));
+        if (report.notAttempted() > 0) {
+            console.info(report.notAttempted() + " more not attempted (filtered, already done, or tier unavailable).");
+        }
+        console.info("The prompts they would send are in " + report.promptDirectory());
+        return ExitCodes.SUCCESS;
     }
 
     private TierRestriction tierRestriction() {

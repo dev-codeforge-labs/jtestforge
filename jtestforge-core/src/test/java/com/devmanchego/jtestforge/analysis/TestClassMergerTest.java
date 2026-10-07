@@ -222,6 +222,69 @@ class TestClassMergerTest {
         assertThat(result.isRejected()).isTrue();
     }
 
+    // --- beforeWrite: the write-ahead hook of phase 3 ----------------------------------------
+
+    @Test
+    void beforeWriteSeesExactlyWhatWillBeAddedWhileTheFileIsStillUntouched(@TempDir Path dir) throws IOException {
+        Path testFile = write(dir, simpleTestClass());
+        String original = Files.readString(testFile);
+        List<String> fileAtCallback = new java.util.ArrayList<>();
+        List<MergeResult> announced = new java.util.ArrayList<>();
+
+        merger.merge(testFile, List.of(candidate("newTest", """
+                @Test
+                void newTest() {
+                    assertEquals(1, 1);
+                }
+                """, List.of("java.time.Clock"))), planned -> {
+                    announced.add(planned);
+                    fileAtCallback.add(readUnchecked(testFile));
+                });
+
+        assertThat(announced).singleElement().satisfies(planned -> {
+            assertThat(planned.addedTestNames()).containsExactly("newTest");
+            assertThat(planned.addedImports()).containsExactly("java.time.Clock");
+        });
+        assertThat(fileAtCallback).containsExactly(original);
+        assertThat(Files.readString(testFile)).contains("void newTest()");
+    }
+
+    @Test
+    void whenBeforeWriteThrowsNothingIsWritten(@TempDir Path dir) throws IOException {
+        // An edit that could not be recorded must not happen.
+        Path testFile = write(dir, simpleTestClass());
+        String original = Files.readString(testFile);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> merger.merge(testFile,
+                        List.of(candidate("newTest", "@Test\nvoid newTest() { assertEquals(1, 1); }\n", List.of())),
+                        planned -> {
+                            throw new IllegalStateException("state.json could not be written");
+                        }))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(Files.readString(testFile)).isEqualTo(original);
+    }
+
+    @Test
+    void beforeWriteIsNotCalledForARefusedBatch(@TempDir Path dir) throws IOException {
+        Path testFile = write(dir, simpleTestClass());
+        List<MergeResult> announced = new java.util.ArrayList<>();
+
+        MergeResult result = merger.merge(testFile, List.of(candidate("anExistingTest",
+                "@Test\nvoid anExistingTest() { assertEquals(2, 2); }\n", List.of())), announced::add);
+
+        assertThat(result.isRejected()).isTrue();
+        assertThat(announced).isEmpty();
+    }
+
+    private static String readUnchecked(Path file) {
+        try {
+            return Files.readString(file);
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
     private String simpleTestClass() {
         return """
                 package com.acme;

@@ -301,4 +301,154 @@ class ConfigValidatorTest {
         return new JTestForgeConfig(c.project(), c.selection(), c.aiProvider(), c.prompts(),
                 c.spring(), c.context(), c.generate(), c.harden(), execution);
     }
+
+    @Test
+    void anUnknownSourceEncodingIsReportedAndAKnownOneIsNot() throws Exception {
+        JTestForgeConfig bad = withProject(fullyValidConfig(), p -> projectWithSourceEncoding(p, "latin-nine-and-a-half"));
+        JTestForgeConfig good = withProject(fullyValidConfig(), p -> projectWithSourceEncoding(p, "windows-1252"));
+        JTestForgeConfig blank = withProject(fullyValidConfig(), p -> projectWithSourceEncoding(p, "  "));
+
+        assertThat(validator.validate(bad, validContext()).errors()).extracting(ConfigViolation::path)
+                .contains("project.sourceEncoding");
+        assertThat(validator.validate(good, validContext()).errors()).extracting(ConfigViolation::path)
+                .doesNotContain("project.sourceEncoding");
+        assertThat(validator.validate(blank, validContext()).errors()).extracting(ConfigViolation::path)
+                .doesNotContain("project.sourceEncoding");
+    }
+
+    private static ProjectConfig projectWithSourceEncoding(ProjectConfig p, String encoding) {
+        return new ProjectConfig(p.modulePath(), p.mavenExecutable(), p.mavenArgs(), p.javaHome(),
+                p.testSourceRoot(), p.mainSourceRoot(), p.testClassSuffix(), p.testClassSuffixByTier(),
+                p.dependencyTreeFile(), p.localRepository(), p.javaVersion(), encoding);
+    }
+
+    @Test
+    void promptDeliveryArgumentThroughABatchLauncherIsWarnedAbout() throws Exception {
+        JTestForgeConfig base = fullyValidConfig();
+        JTestForgeConfig config = withActiveProvider(base, "gemini.cmd", PromptDelivery.ARGUMENT);
+
+        ValidationResult result = validator.validate(config, validContext());
+
+        assertThat(result.warnings()).extracting(ConfigViolation::path)
+                .contains("aiProvider.providers." + base.aiProvider().active() + ".promptDelivery");
+        assertThat(result.warnings()).anySatisfy(warning ->
+                assertThat(warning.toString()).contains("cmd.exe").contains("stdin"));
+    }
+
+    @Test
+    void stdinDeliveryThroughABatchLauncherIsNotWarnedAbout() throws Exception {
+        JTestForgeConfig config = withActiveProvider(fullyValidConfig(), "gemini.cmd", PromptDelivery.STDIN);
+
+        assertThat(validator.validate(config, validContext()).warnings()).extracting(ConfigViolation::path)
+                .noneMatch(path -> path.endsWith(".promptDelivery"));
+    }
+
+    @Test
+    void argumentDeliveryThroughAnOrdinaryExecutableIsNotWarnedAbout() throws Exception {
+        JTestForgeConfig config = withActiveProvider(fullyValidConfig(), resolvableCommand(), PromptDelivery.ARGUMENT);
+
+        assertThat(validator.validate(config, validContext()).warnings()).extracting(ConfigViolation::path)
+                .noneMatch(path -> path.endsWith(".promptDelivery"));
+    }
+
+    private static JTestForgeConfig withActiveProvider(JTestForgeConfig c, String command, PromptDelivery delivery) {
+        String active = c.aiProvider().active();
+        AiProviderConfig aiProvider = new AiProviderConfig(active,
+                java.util.Map.of(active, new ProviderConfig(command, java.util.List.of(), delivery, null, null, null, null)),
+                c.aiProvider().isolateWorkingDirectory());
+        return new JTestForgeConfig(c.project(), c.selection(), aiProvider, c.prompts(), c.spring(), c.context(),
+                c.generate(), c.harden(), c.execution());
+    }
+
+    // --- HTTP providers (phase B1) ------------------------------------------------------------
+
+    @Test
+    void aLocalHttpProviderNeedsNoCommandAndIsFullyValid() throws Exception {
+        JTestForgeConfig config = withHttpProvider(fullyValidConfig(), null, "http://localhost:11434", "qwen3-coder:30b", null);
+
+        ValidationResult result = validator.validate(config, validContext());
+
+        assertThat(result.errors()).isEmpty();
+        assertThat(result.warnings()).extracting(ConfigViolation::path).noneMatch(path -> path.endsWith(".baseUrl"));
+    }
+
+    @Test
+    void anHttpProviderMissingItsEndpointOrModelIsReportedByName() throws Exception {
+        JTestForgeConfig config = withHttpProvider(fullyValidConfig(), null, null, "", null);
+
+        assertThat(validator.validate(config, validContext()).errors()).extracting(ConfigViolation::path)
+                .contains("aiProvider.providers.claude.baseUrl", "aiProvider.providers.claude.model");
+    }
+
+    @Test
+    void aBaseUrlThatIsNotAnHttpUrlWithAHostIsRejected() throws Exception {
+        for (String bad : new String[] {"localhost:11434", "ftp://localhost/x", "not a url", "http://"}) {
+            JTestForgeConfig config = withHttpProvider(fullyValidConfig(), null, bad, "m", null);
+
+            assertThat(validator.validate(config, validContext()).errors()).as(bad).extracting(ConfigViolation::path)
+                    .contains("aiProvider.providers.claude.baseUrl");
+        }
+    }
+
+    @Test
+    void aCommandOnAnHttpProviderIsRefusedBecauseItWouldNeverRun() throws Exception {
+        JTestForgeConfig config = withHttpProvider(fullyValidConfig(), "ollama", "http://localhost:11434", "m", null);
+
+        assertThat(validator.validate(config, validContext()).errors()).extracting(ConfigViolation::path)
+                .contains("aiProvider.providers.claude.command");
+    }
+
+    @Test
+    void anEndpointThatIsNotThisMachineIsWarnedAboutBecauseTheSourceIsSentThere() throws Exception {
+        JTestForgeConfig config = withHttpProvider(fullyValidConfig(), null, "https://llm.corp.example:8443", "m", null);
+
+        ValidationResult result = validator.validate(config, validContext());
+
+        assertThat(result.errors()).isEmpty();
+        assertThat(result.warnings()).anySatisfy(warning -> assertThat(warning.toString())
+                .contains("llm.corp.example").contains("sent there"));
+    }
+
+    @Test
+    void loopbackAddressesAreNotWarnedAbout() throws Exception {
+        for (String local : new String[] {"http://127.0.0.1:11434", "http://localhost", "http://[::1]:11434",
+                "http://ollama.localhost:11434"}) {
+            JTestForgeConfig config = withHttpProvider(fullyValidConfig(), null, local, "m", null);
+
+            assertThat(validator.validate(config, validContext()).warnings()).as(local)
+                    .extracting(ConfigViolation::path).noneMatch(path -> path.endsWith(".baseUrl"));
+        }
+    }
+
+    @Test
+    void anApiOtherThanOllamaIsRejectedForNow() throws Exception {
+        JTestForgeConfig config = withHttpProvider(fullyValidConfig(), null, "http://localhost:11434", "m", "openai");
+
+        assertThat(validator.validate(config, validContext()).errors()).extracting(ConfigViolation::path)
+                .contains("aiProvider.providers.claude.api");
+    }
+
+    @Test
+    void aProcessProviderWithNoCommandIsReportedInsteadOfFailingLater() throws Exception {
+        JTestForgeConfig base = fullyValidConfig();
+        String active = base.aiProvider().active();
+        JTestForgeConfig config = new JTestForgeConfig(base.project(), base.selection(),
+                new AiProviderConfig(active, java.util.Map.of(active,
+                        new ProviderConfig(null, null, null, null, null, null, null)),
+                        base.aiProvider().isolateWorkingDirectory()),
+                base.prompts(), base.spring(), base.context(), base.generate(), base.harden(), base.execution());
+
+        assertThat(validator.validate(config, validContext()).errors()).extracting(ConfigViolation::path)
+                .contains("aiProvider.providers." + active + ".command");
+    }
+
+    private static JTestForgeConfig withHttpProvider(
+            JTestForgeConfig c, String command, String baseUrl, String model, String api) {
+        String active = c.aiProvider().active();
+        ProviderConfig http = new ProviderConfig(command, null, null, null, null, null, null,
+                ProviderType.HTTP, api, baseUrl, model, null, null, null);
+        return new JTestForgeConfig(c.project(), c.selection(),
+                new AiProviderConfig(active, java.util.Map.of(active, http), c.aiProvider().isolateWorkingDirectory()),
+                c.prompts(), c.spring(), c.context(), c.generate(), c.harden(), c.execution());
+    }
 }

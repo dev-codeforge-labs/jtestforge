@@ -44,8 +44,23 @@ import java.util.regex.Pattern;
  */
 public final class ResponseParser {
 
-    private static final Pattern FENCE = Pattern.compile(
-            "```([A-Za-z]*)\\r?\\n(.*?)```", Pattern.DOTALL);
+    /**
+     * A whole line that is a code fence: three or more backticks, optionally followed by a
+     * language. Scanned line by line instead of matched with one regex because a regex pairs
+     * fences strictly left to right, so a single stray fence line shifts every block after it
+     * - found against a local Ollama model, whose repair answer began with a bare fence line
+     * and made the parser see no {@code java} block at all.
+     */
+    private static final Pattern FENCE_LINE = Pattern.compile("^\\s*(`{3,})\\s*([A-Za-z]*)\\s*$");
+    /**
+     * A line that only names something to import: {@code import static a.b.C.d;}, {@code
+     * a.b.C} or {@code a.b.*}. A block made only of these can never be the block of test
+     * methods, so it cannot let anything unwanted through - which is what makes it safe to
+     * read as an imports block whatever language label the model gave it. The keyword or at
+     * least one dot is required, so a lone identifier line is never mistaken for one.
+     */
+    private static final Pattern IMPORT_ONLY_LINE = Pattern.compile(
+            "^(import\\s+)?(static\\s+)?[A-Za-z_]\\w*(\\.[A-Za-z_]\\w*)*(\\.\\*)?\\s*;?$");
     private static final Pattern UNCLOSED_JAVA_FENCE = Pattern.compile(
             "```java\\r?\\n(?!.*```)", Pattern.DOTALL);
     /**
@@ -86,14 +101,44 @@ public final class ResponseParser {
             return fatal(ContractViolationKind.NOT_FENCED, "the response was empty.");
         }
 
-        String javaBlock = extractFencedBlock(rawResponse, "java");
+        String javaBlock = null;
+        String firstUnlabelledCode = null;
+        boolean sawJavaBlockWithOnlyImports = false;
+        List<String> importLines = new ArrayList<>();
+        for (FencedBlock block : fencedBlocks(rawResponse)) {
+            boolean isJava = block.language().equalsIgnoreCase("java");
+            if (block.language().equalsIgnoreCase("imports")) {
+                importLines.addAll(block.content().lines().toList());
+            } else if ((isJava || block.language().isEmpty()) && isImportOnly(block.content())) {
+                // The model put its imports under the wrong label (java, or none at all).
+                importLines.addAll(block.content().lines().toList());
+                sawJavaBlockWithOnlyImports |= isJava;
+            } else if (isJava && javaBlock == null) {
+                javaBlock = stripLeakedToolNarrationLines(block.content());
+            } else if (block.language().isEmpty() && firstUnlabelledCode == null && !block.content().isBlank()) {
+                firstUnlabelledCode = block.content();
+            }
+        }
+        if (javaBlock == null && firstUnlabelledCode != null
+                && !UNCLOSED_JAVA_FENCE.matcher(rawResponse).find()) {
+            // No ```java block at all, only an unlabelled block of code: the model forgot the
+            // label, not the content. Everything downstream still judges that content exactly
+            // as if it had been labelled - it must still parse as a list of @Test methods and
+            // pass the same guards. An unclosed ```java fence is excluded: that is a truncated
+            // answer, and a stray earlier block must not paper over it.
+            javaBlock = stripLeakedToolNarrationLines(firstUnlabelledCode);
+        }
         if (javaBlock != null) {
-            javaBlock = stripLeakedToolNarrationLines(javaBlock);
+            javaBlock = liftLeadingImports(javaBlock, importLines);
         }
         if (javaBlock == null) {
             if (UNCLOSED_JAVA_FENCE.matcher(rawResponse).find()) {
                 return fatal(ContractViolationKind.NOT_FENCED,
                         "a ```java block was opened but never closed - the response looks truncated.");
+            }
+            if (sawJavaBlockWithOnlyImports) {
+                return fatal(ContractViolationKind.NOT_FENCED,
+                        "the ```java block holds only import statements and no test methods.");
             }
             return fatal(ContractViolationKind.NOT_FENCED,
                     "no ```java fenced block was found in the response.");
@@ -108,7 +153,7 @@ public final class ResponseParser {
             return fatal(ContractViolationKind.UNPARSEABLE_JAVA_BLOCK, e.getMessage());
         }
 
-        List<String> imports = parseImportsBlock(rawResponse);
+        List<String> imports = normalizeImportLines(importLines);
         List<DroppedDeclaration> dropped = new ArrayList<>();
         List<String> keptImports = filterImports(imports, dropped);
 
@@ -284,25 +329,120 @@ public final class ResponseParser {
         return declaration instanceof ClassOrInterfaceDeclaration;
     }
 
-    private String extractFencedBlock(String response, String language) {
-        Matcher matcher = FENCE.matcher(response);
-        while (matcher.find()) {
-            if (matcher.group(1).equalsIgnoreCase(language)) {
-                return matcher.group(2);
-            }
-        }
-        return null;
+    /** One fenced block of the response; {@code language} is empty when the fence carries none. */
+    private record FencedBlock(String language, String content) {
     }
 
-    private List<String> parseImportsBlock(String response) {
-        String block = extractFencedBlock(response, "imports");
-        if (block == null || block.isBlank()) {
-            return List.of();
+    /**
+     * Splits the response into its fenced blocks, in order. Only a block that is properly
+     * closed is returned, so a truncated answer still yields no {@code java} block and keeps
+     * being reported as truncated.
+     *
+     * <p>A closing fence never carries a language in Markdown, so a <em>labelled</em> fence
+     * met inside an open block can only be the opening of the next one: the block before it
+     * was never closed. It is kept if it has content and dropped if it is blank - the blank
+     * case being exactly a stray fence line the model left ahead of the real blocks. A
+     * closing fence also has to be at least as long as the one that opened the block, which
+     * is what lets an answer closed with four backticks (an echo of the prompt's own
+     * template) still close a block opened with three.
+     */
+    private List<FencedBlock> fencedBlocks(String response) {
+        List<FencedBlock> blocks = new ArrayList<>();
+        String language = null;
+        int openLength = 0;
+        StringBuilder content = new StringBuilder();
+        for (String line : response.split("\\r?\\n", -1)) {
+            Matcher fence = FENCE_LINE.matcher(line);
+            if (!fence.matches()) {
+                if (language != null) {
+                    content.append(line).append('\n');
+                }
+                continue;
+            }
+            String ticks = fence.group(1);
+            String label = fence.group(2);
+            if (language == null) {
+                language = label;
+                openLength = ticks.length();
+                content.setLength(0);
+            } else if (label.isEmpty() && ticks.length() >= openLength) {
+                blocks.add(new FencedBlock(language, content.toString()));
+                language = null;
+            } else if (!label.isEmpty()) {
+                if (!content.toString().isBlank()) {
+                    blocks.add(new FencedBlock(language, content.toString()));
+                }
+                language = label;
+                openLength = ticks.length();
+                content.setLength(0);
+            } else {
+                content.append(line).append('\n');
+            }
         }
-        return block.lines()
+        return blocks;
+    }
+
+    /**
+     * Moves the {@code import ...;} statements a model wrote at the very top of the tests
+     * block into {@code importLines}, and returns the rest. Found against a local Ollama
+     * model whose repair answer put its imports and its methods in the same {@code java}
+     * block - which the class-body wrapper in {@link #parseAsBodyDeclarations} cannot parse,
+     * because an {@code import} cannot legally appear inside a class body.
+     *
+     * <p>That is what makes this safe: such a block could never have been accepted before, so
+     * lifting its leading imports cannot let through anything that used to be refused. Only
+     * the unbroken run of imports at the top is lifted (blank lines in between are fine); an
+     * import after the first member, a {@code package} line, or a class declaration stops it,
+     * so a whole compilation unit is still left intact and still rejected as one.
+     */
+    private String liftLeadingImports(String javaBlock, List<String> importLines) {
+        List<String> lines = javaBlock.lines().toList();
+        int firstNonImport = 0;
+        List<String> lifted = new ArrayList<>();
+        for (String raw : lines) {
+            String line = raw.strip();
+            if (line.isEmpty()) {
+                firstNonImport++;
+                continue;
+            }
+            if (line.startsWith("import ") && line.endsWith(";") && IMPORT_ONLY_LINE.matcher(line).matches()) {
+                lifted.add(line);
+                firstNonImport++;
+                continue;
+            }
+            break;
+        }
+        if (lifted.isEmpty()) {
+            return javaBlock;
+        }
+        importLines.addAll(lifted);
+        return String.join("\n", lines.subList(firstNonImport, lines.size()));
+    }
+
+    /** Whether every non-blank line only names something to import - see {@link #IMPORT_ONLY_LINE}. */
+    private boolean isImportOnly(String blockContent) {
+        boolean anyLine = false;
+        for (String raw : blockContent.lines().toList()) {
+            String line = raw.strip();
+            if (line.isEmpty()) {
+                continue;
+            }
+            if (!IMPORT_ONLY_LINE.matcher(line).matches()
+                    || !(line.startsWith("import ") || line.contains("."))) {
+                return false;
+            }
+            anyLine = true;
+        }
+        return anyLine;
+    }
+
+    /** Blank lines dropped, each line normalised, and a repeated import kept once. */
+    private List<String> normalizeImportLines(List<String> rawLines) {
+        return rawLines.stream()
                 .map(String::strip)
                 .filter(line -> !line.isEmpty())
                 .map(this::normalizeImportLine)
+                .distinct()
                 .toList();
     }
 

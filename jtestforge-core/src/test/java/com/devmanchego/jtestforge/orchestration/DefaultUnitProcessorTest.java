@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The real per-unit loop of §9.4, driven by a {@link RecordedAiProvider} and a
@@ -110,6 +111,201 @@ class DefaultUnitProcessorTest {
         assertThat(outcome.addedTests()).containsExactly("classify_aboveThreshold_returnsTwo");
         assertThat(outcome.linesCoveredDelta()).isEqualTo(3);
         assertThat(Files.readString(testFile)).contains("classify_aboveThreshold_returnsTwo");
+    }
+
+    @Test
+    void anExistingTestFileThatCannotBeParsedIsNeverOverwrittenWithASkeleton() throws IOException {
+        // Discovery already skips such a unit; this pins the processor's own last line of
+        // defence, for a file that turns unreadable after discovery looked at it.
+        String brokenButPrecious = """
+                package com.acme;
+
+                class PaymentServiceTest {
+                    @Test
+                    void aDeveloperWroteThis() { this no longer parses }
+                }
+                """;
+        UnitContext withoutTestClassInfo = context().withTestClassInfo(null);
+        Files.writeString(testFile, brokenButPrecious);
+
+        UnitOutcome outcome = processor().process(withoutTestClassInfo);
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.SKIPPED_TEST_FILE_UNREADABLE);
+        assertThat(outcome.error()).contains("PaymentServiceTest.java").containsIgnoringCase("parse");
+        assertThat(Files.readString(testFile)).isEqualTo(brokenButPrecious);
+        assertThat(provider.receivedPrompts()).isEmpty();
+    }
+
+    // --- phase 3: write-ahead journal -----------------------------------------------------------
+
+    @Test
+    void everyMergeIsJournaledBeforeItIsWrittenAndEveryRevertClearsTheJournalAfterwards() throws IOException {
+        provider.enqueueResponse(response("wrongExpectation", "assertThat(subject.classify(500)).isEqualTo(9);"))
+                .enqueueResponse(response("fixedExpectation", "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(2)
+                .scopedTestsFail("expected 9 but was 2")
+                .scopedTestsPass()
+                .coverage(coverageWith(5));
+        List<String> journal = new java.util.ArrayList<>();
+
+        UnitOutcome outcome = processor().process(context(), (addedTests, addedImports) -> {
+            String file = readUnchecked(testFile);
+            journal.add(addedTests + " wrongInFile=" + file.contains("wrongExpectation")
+                    + " fixedInFile=" + file.contains("fixedExpectation"));
+        });
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
+        assertThat(journal).containsExactly(
+                // recorded before the merge reached the file
+                "[wrongExpectation] wrongInFile=false fixedInFile=false",
+                // cleared only once the revert had already taken it out
+                "[] wrongInFile=false fixedInFile=false",
+                "[fixedExpectation] wrongInFile=false fixedInFile=false");
+    }
+
+    @Test
+    void anUnexpectedExceptionAlsoLeavesTheJournalEmptyOnceTheFileIsRestored() throws IOException {
+        provider.enqueueResponse(response("classify_aboveThreshold_returnsTwo",
+                "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedRunThrows(new IllegalStateException("maven was interrupted"));
+        List<List<String>> journal = new java.util.ArrayList<>();
+
+        assertThatThrownBy(() -> processor().process(context(), (addedTests, addedImports) -> journal.add(addedTests)))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(journal).containsExactly(List.of("classify_aboveThreshold_returnsTwo"), List.of());
+    }
+
+    private static String readUnchecked(Path file) {
+        try {
+            return Files.readString(file);
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    // --- phase 2 / 2b: nothing survives a failure, whichever way the unit ends ----------------
+
+    @Test
+    void anUnexpectedExceptionAfterMergingStillRestoresTheFileAndIsRethrown() throws IOException {
+        String original = Files.readString(testFile);
+        provider.enqueueResponse(response("classify_aboveThreshold_returnsTwo",
+                "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedRunThrows(new IllegalStateException("maven was interrupted"));
+
+        assertThatThrownBy(() -> processor().process(context()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("maven was interrupted");
+
+        assertThat(Files.readString(testFile)).isEqualTo(original);
+    }
+
+    @Test
+    void aSkeletonTheUnitCreatedIsDeletedWhenTheUnitIsDiscarded() throws IOException {
+        // Observed in a real run: a discarded unit left an empty OrderServiceTest behind.
+        provider.enqueueResponse("I could not think of any test for this method.")
+                .enqueueResponse("Still no tests, sorry.");
+        UnitContext noTestClassYet = context().withTestClassInfo(null);
+        Files.delete(testFile);
+
+        UnitOutcome outcome = processor().process(noTestClassYet);
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DISCARDED_NO_VALUE);
+        assertThat(testFile).doesNotExist();
+    }
+
+    @Test
+    void aSkeletonTheUnitCreatedIsDeletedWhenAnUnexpectedExceptionEndsTheUnit() throws IOException {
+        provider.enqueueResponse(response("classify_aboveThreshold_returnsTwo",
+                "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedRunThrows(new IllegalStateException("maven was interrupted"));
+        UnitContext noTestClassYet = context().withTestClassInfo(null);
+        Files.delete(testFile);
+
+        assertThatThrownBy(() -> processor().process(noTestClassYet)).isInstanceOf(IllegalStateException.class);
+
+        assertThat(testFile).doesNotExist();
+    }
+
+    @Test
+    void aSkeletonTheUnitCreatedIsKeptWhenTheUnitSucceeds() throws IOException {
+        provider.enqueueResponse(response("classify_aboveThreshold_returnsTwo",
+                "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedTestsPass().coverage(coverageWith(5));
+        UnitContext noTestClassYet = context().withTestClassInfo(null);
+        Files.delete(testFile);
+
+        UnitOutcome outcome = processor().process(noTestClassYet);
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
+        assertThat(Files.readString(testFile)).contains("classify_aboveThreshold_returnsTwo");
+    }
+
+    @Test
+    void aTestClassThatAlreadyExistedIsNeverDeletedWhenTheUnitFails() throws IOException {
+        provider.enqueueResponse("I could not think of any test for this method.")
+                .enqueueResponse("Still no tests, sorry.");
+
+        UnitOutcome outcome = processor().process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DISCARDED_NO_VALUE);
+        assertThat(Files.readString(testFile)).isEqualTo(EXISTING_TEST_CLASS);
+    }
+
+    @Test
+    void theProcessorIsReusableAfterAnExceptionWithNoStateLeakingIntoTheNextUnit() throws IOException {
+        // The edits record lives in a field; a unit that threw must not leave its batch or its
+        // "I created the file" flag behind for the next unit to act on.
+        provider.enqueueResponse(response("firstUnit", "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedRunThrows(new IllegalStateException("boom"));
+        DefaultUnitProcessor processor = processor();
+        UnitContext noTestClassYet = context().withTestClassInfo(null);
+        Files.delete(testFile);
+        assertThatThrownBy(() -> processor.process(noTestClassYet)).isInstanceOf(IllegalStateException.class);
+
+        Files.writeString(testFile, EXISTING_TEST_CLASS);
+        provider.enqueueResponse("nothing useful").enqueueResponse("still nothing useful");
+        UnitOutcome second = processor.process(context());
+
+        assertThat(second.status()).isEqualTo(UnitStatus.DISCARDED_NO_VALUE);
+        assertThat(Files.readString(testFile)).isEqualTo(EXISTING_TEST_CLASS);
+    }
+
+    @Test
+    void testsWhoseBodiesAreCopiesOfAnotherTestInTheResponseAreDroppedAndRecorded() throws IOException {
+        // Wiring check for guard 12: it is a batch-level guard, and a guard nothing calls
+        // protects nothing (SemanticDuplicateGuard is exactly that). Three tests, one body.
+        provider.enqueueResponse("""
+                ```java
+                @Test
+                void classify_aboveThreshold_returnsTwo() {
+                    assertThat(subject.classify(500)).isEqualTo(2);
+                }
+
+                @Test
+                void classify_exactlyAtThreshold_returnsTwo() {
+                    assertThat(subject.classify(500)).isEqualTo(2);
+                }
+
+                @Test
+                void classify_wellAboveThreshold_returnsTwo() {
+                    assertThat(subject.classify(500)).isEqualTo(2);
+                }
+                ```
+                """);
+        build.compilesSuccessfully(1).scopedTestsPass().coverage(coverageWith(5));
+
+        UnitOutcome outcome = processor().process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
+        assertThat(outcome.addedTests()).containsExactly("classify_aboveThreshold_returnsTwo");
+        assertThat(outcome.discarded()).anySatisfy(entry -> assertThat(entry)
+                .contains("DUPLICATE_BODY").contains("classify_exactlyAtThreshold_returnsTwo"));
+        assertThat(outcome.discarded()).anySatisfy(entry -> assertThat(entry)
+                .contains("DUPLICATE_BODY").contains("classify_wellAboveThreshold_returnsTwo"));
+        assertThat(Files.readString(testFile))
+                .contains("classify_aboveThreshold_returnsTwo")
+                .doesNotContain("classify_exactlyAtThreshold_returnsTwo");
     }
 
     @Test
@@ -187,6 +383,83 @@ class DefaultUnitProcessorTest {
         UnitOutcome outcome = processor().process(context());
 
         assertThat(outcome.status()).isEqualTo(UnitStatus.FAILED_ASSERTION);
+        assertThat(Files.readString(testFile)).isEqualTo(original);
+    }
+
+    @Test
+    void anAssertionRepairThatDoesNotCompileGetsACompileRepairRoundInsteadOfEndingTheUnit() throws IOException {
+        // Found against a local model: its assertion repair used matchers it never imported.
+        provider.enqueueResponse(response("wrongExpectation", "assertThat(subject.classify(500)).isEqualTo(9);"))
+                .enqueueResponse(response("repairedButMissingAnImport", "assertThat(subject.classify(500)).isEqualTo(2);"))
+                .enqueueResponse(response("repairedAndCompiling", "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1)
+                .failsToCompile("cannot find symbol: anyString")
+                .compilesSuccessfully(1)
+                .scopedTestsFail("expected 9 but was 2")
+                .scopedTestsPass()
+                .coverage(coverageWith(5));
+
+        UnitOutcome outcome = processor().process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
+        assertThat(outcome.addedTests()).containsExactly("repairedAndCompiling");
+        assertThat(provider.receivedPrompts()).hasSize(3);
+        assertThat(provider.receivedPrompts().get(2)).contains("cannot find symbol: anyString");
+        assertThat(Files.readString(testFile))
+                .contains("repairedAndCompiling")
+                .doesNotContain("wrongExpectation")
+                .doesNotContain("repairedButMissingAnImport");
+    }
+
+    @Test
+    void everyAiCallOfAUnitGetsItsOwnTranscriptNumberSoNoRepairOverwritesAnother() throws IOException {
+        // Phase 4. Generation, an assertion repair and a compile repair used to be numbered 1, 2
+        // and 2: the last transcript silently replaced the one before it.
+        provider.enqueueResponse(response("wrongExpectation", "assertThat(subject.classify(500)).isEqualTo(9);"))
+                .enqueueResponse(response("repairedButMissingAnImport", "assertThat(subject.classify(500)).isEqualTo(2);"))
+                .enqueueResponse(response("repairedAndCompiling", "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1)
+                .failsToCompile("cannot find symbol: anyString")
+                .compilesSuccessfully(1)
+                .scopedTestsFail("expected 9 but was 2")
+                .scopedTestsPass()
+                .coverage(coverageWith(5));
+
+        processor().process(context());
+
+        Path unitDir;
+        try (var units = Files.list(moduleDir.resolve("state").resolve("transcripts"))) {
+            unitDir = units.findFirst().orElseThrow();
+        }
+        try (var files = Files.list(unitDir)) {
+            assertThat(files.map(file -> file.getFileName().toString()).filter(name -> name.endsWith(".prompt.md")))
+                    .containsExactlyInAnyOrder("1.prompt.md", "2.prompt.md", "3.prompt.md");
+        }
+        for (int call = 1; call <= 3; call++) {
+            assertThat(Files.readString(unitDir.resolve(call + ".prompt.md")))
+                    .isEqualTo(provider.receivedPrompts().get(call - 1));
+        }
+    }
+
+    @Test
+    void anAssertionRepairThatNeverCompilesStillEndsFailedAssertionWithBoundedCallsAndTheFileRestored()
+            throws IOException {
+        String original = Files.readString(testFile);
+        provider.enqueueResponse(response("wrongExpectation", "assertThat(subject.classify(500)).isEqualTo(9);"))
+                .enqueueResponse(response("brokenRepair", "assertThat(subject.classify(500)).isEqualTo(2);"))
+                .enqueueResponse(response("brokenAgain", "assertThat(subject.classify(500)).isEqualTo(2);"))
+                .enqueueResponse(response("brokenOnceMore", "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1)
+                .failsToCompile("cannot find symbol: a")
+                .failsToCompile("cannot find symbol: b")
+                .failsToCompile("cannot find symbol: c")
+                .scopedTestsFail("expected 9 but was 2");
+
+        UnitOutcome outcome = processor().process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.FAILED_ASSERTION);
+        // generation + assertion repair + maxRepairAttempts (2) compile repairs, and no more
+        assertThat(provider.receivedPrompts()).hasSize(4);
         assertThat(Files.readString(testFile)).isEqualTo(original);
     }
 
@@ -330,7 +603,8 @@ class DefaultUnitProcessorTest {
     @Test
     void aResponseViolatingTheContractIsRecordedAndWritesNothing() throws IOException {
         String original = Files.readString(testFile);
-        provider.enqueueResponse("I could not write those tests, sorry.");
+        provider.enqueueResponse("I could not write those tests, sorry.")
+                .enqueueResponse("Still could not, sorry.");
 
         UnitOutcome outcome = processor().process(context());
 
@@ -338,6 +612,82 @@ class DefaultUnitProcessorTest {
         assertThat(outcome.discarded()).anySatisfy(reason ->
                 assertThat(reason).contains("response contract violation"));
         assertThat(Files.readString(testFile)).isEqualTo(original);
+    }
+
+    // --- phase 4b (#10): the single corrective re-prompt of §6.2 ------------------------------
+
+    @Test
+    void anAnswerThatBreaksTheContractGetsOneCorrectiveRePromptAndTheCorrectedAnswerIsKept() throws IOException {
+        // The shape a local model actually produced: imports and tests in one java block,
+        // preceded by a whole class declaration - unreadable as a list of test methods.
+        String broken = """
+                ```java
+                class PaymentServiceTest {
+                    @Test
+                    void classify_aboveThreshold_returnsTwo() {
+                        assertThat(subject.classify(500)).isEqualTo(2);
+                    }
+                }
+                ```
+                """;
+        provider.enqueueResponse(broken)
+                .enqueueResponse(response("classify_aboveThreshold_returnsTwo",
+                        "assertThat(subject.classify(500)).isEqualTo(2);"));
+        build.compilesSuccessfully(1).scopedTestsPass().coverage(coverageWith(5));
+
+        UnitOutcome outcome = processor().process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.DONE);
+        assertThat(outcome.addedTests()).containsExactly("classify_aboveThreshold_returnsTwo");
+        assertThat(provider.receivedPrompts()).hasSize(2);
+        String corrective = provider.receivedPrompts().get(1);
+        assertThat(corrective).contains("Your previous answer could not be used")
+                .contains("single class/interface declaration")
+                .contains("class PaymentServiceTest {");
+        assertThat(outcome.discarded()).anySatisfy(entry ->
+                assertThat(entry).contains("asked the model to correct it"));
+    }
+
+    @Test
+    void theCorrectionIsSpentOncePerUnitSoALaterBrokenAnswerEndsTheUnitWithoutAnotherOne() throws IOException {
+        // Broken, corrected (but does not compile), then a compile repair that is broken again:
+        // no second corrective prompt - three calls in all, not four.
+        provider.enqueueResponse("no fenced block at all")
+                .enqueueResponse(response("firstAttempt", "assertThat(subject.nope()).isEqualTo(2);"))
+                .enqueueResponse("still no fenced block");
+        build.failsToCompile("cannot find symbol: nope");
+
+        UnitOutcome outcome = processor().process(context());
+
+        assertThat(outcome.status()).isEqualTo(UnitStatus.FAILED_COMPILE);
+        assertThat(provider.receivedPrompts()).hasSize(3);
+        assertThat(provider.receivedPrompts().get(2)).contains("cannot find symbol: nope")
+                .doesNotContain("Your previous answer could not be used");
+        assertThat(Files.readString(testFile)).isEqualTo(EXISTING_TEST_CLASS);
+    }
+
+    @Test
+    void thePreviousAnswerIsShownWithItsPlaceholderLookalikesDefused() throws IOException {
+        // Nothing in the model's own text may be expanded by the template renderer.
+        provider.enqueueResponse("Here is {{CLASS_SOURCE}} and {{RULES}}, no code block.")
+                .enqueueResponse("still nothing");
+
+        processor().process(context());
+
+        String corrective = provider.receivedPrompts().get(1);
+        assertThat(corrective).contains("Here is { {CLASS_SOURCE}} and { {RULES}}, no code block.");
+    }
+
+    @Test
+    void aRunawayPreviousAnswerIsCappedInTheCorrectivePrompt() throws IOException {
+        String runaway = "import static org.example.Matchers.status;\n".repeat(2_000);
+        provider.enqueueResponse(runaway).enqueueResponse("still nothing");
+
+        processor().process(context());
+
+        String corrective = provider.receivedPrompts().get(1);
+        assertThat(corrective).contains("truncated by JTestForge");
+        assertThat(corrective.length()).isLessThan(runaway.length());
     }
 
     @Test

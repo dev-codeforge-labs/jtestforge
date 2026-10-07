@@ -11,7 +11,7 @@ import java.util.Map;
 public final class PomReader {
 
     private static final String COMPILER_PLUGIN = "maven-compiler-plugin";
-    private static final List<String> COMPILER_KEYS = List.of("release", "source", "target");
+    private static final List<String> COMPILER_KEYS = List.of("release", "source", "target", "encoding");
 
     private PomReader() {
     }

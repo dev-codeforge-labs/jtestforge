@@ -37,7 +37,11 @@ public enum PromptPlaceholder {
     MOCK_BEANS,
     PERSISTENCE_MODEL,
     FRAMEWORK_SEMANTIC_GAPS,
-    SPRING_RULES;
+    SPRING_RULES,
+    /** Why the previous answer broke the response contract - only meaningful in {@code fix-contract.md}. */
+    CONTRACT_VIOLATION,
+    /** The previous answer itself, capped, so the model can resend its tests in the right shape. */
+    PREVIOUS_RESPONSE;
 
     /** The token as it appears in a template, e.g. {@code {{CLASS_FQN}}}. */
     public String token() {
@@ -55,6 +59,7 @@ public enum PromptPlaceholder {
      * save nothing while losing information the model needs.
      */
     public boolean isBulky() {
-        return this == CLASS_SOURCE || this == EXISTING_TEST_CLASS || this == TARGET_METHOD_SOURCE;
+        return this == CLASS_SOURCE || this == EXISTING_TEST_CLASS || this == TARGET_METHOD_SOURCE
+                || this == PREVIOUS_RESPONSE;
     }
 }

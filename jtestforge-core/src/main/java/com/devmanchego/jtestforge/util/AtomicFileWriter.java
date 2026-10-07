@@ -35,8 +35,18 @@ public final class AtomicFileWriter {
      * atomic if another process is renaming into the same target concurrently.
      */
     public static void write(Path target, String content) throws IOException {
+        write(target, content, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * As {@link #write(Path, String)}, in {@code charset} - for a developer's own source files,
+     * which must be written back in the encoding they were read in. Throws if {@code content} has
+     * a character {@code charset} cannot represent, rather than writing a replacement character.
+     */
+    public static void write(Path target, String content, java.nio.charset.Charset charset) throws IOException {
         Objects.requireNonNull(target, "target");
         Objects.requireNonNull(content, "content");
+        Objects.requireNonNull(charset, "charset");
 
         Path parent = target.toAbsolutePath().getParent();
         if (parent == null) {
@@ -46,7 +56,21 @@ public final class AtomicFileWriter {
 
         Path tempFile = Files.createTempFile(parent, target.getFileName().toString(), ".tmp");
         try {
-            Files.writeString(tempFile, content, StandardCharsets.UTF_8);
+            // String.getBytes would silently turn an unmappable character into a question mark;
+            // the encoder reports it instead.
+            java.nio.ByteBuffer encoded = charset.newEncoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .encode(java.nio.CharBuffer.wrap(content));
+            byte[] bytes = new byte[encoded.remaining()];
+            encoded.get(bytes);
+            // Forced to disk before the rename: without it a power cut can leave the rename
+            // durable and the content not, i.e. an empty or truncated state.json or test class.
+            try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(tempFile,
+                    java.nio.file.StandardOpenOption.WRITE)) {
+                channel.write(java.nio.ByteBuffer.wrap(bytes));
+                channel.force(true);
+            }
             moveIntoPlace(tempFile, target);
         } finally {
             // If the move succeeded, tempFile no longer exists at this path and this is

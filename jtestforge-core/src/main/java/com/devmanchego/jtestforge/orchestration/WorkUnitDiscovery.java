@@ -182,6 +182,16 @@ public final class WorkUnitDiscovery {
         WorkUnitId id = WorkUnitId.of(productionClass.fqn(), method.signature(), tier);
         WorkUnit workUnit = WorkUnit.pending(id, testFile.toString(),
                 productionClass.sourceFile().toString(), hashOf(productionClass.sourceFile()));
+        // A test file that exists but cannot be read is not a missing one: treating it as
+        // missing is what used to make the loop write a fresh skeleton over the developer's
+        // tests. The unit is still listed - so the run report says why it was not attempted -
+        // but it never reaches the generation loop.
+        Optional<String> unreadable = testClassLocator.unreadableReason(testFile);
+        if (unreadable.isPresent()) {
+            workUnit = workUnit.withSkipped(UnitStatus.SKIPPED_TEST_FILE_UNREADABLE,
+                    "the existing test file " + testFile.getFileName() + " was left untouched because "
+                            + unreadable.get());
+        }
 
         String fileName = testFile.getFileName().toString();
         String testClassSimpleName = fileName.endsWith(".java")

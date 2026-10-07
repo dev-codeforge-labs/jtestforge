@@ -93,4 +93,65 @@ class PromptTemplateLoaderTest {
     void bundledTextIsAvailableForInitToScaffoldOut() {
         assertThat(loader.bundledTextOf(PromptTemplateId.RULES)).contains("Response format");
     }
+
+    // --- fix-contract.md: added after projects were already scaffolded ------------------------
+
+    @Test
+    void aProjectScaffoldedBeforeFixContractExistedStillLoadsUsingTheBundledDefault(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws java.io.IOException {
+        // Exactly what an existing project looks like after upgrading: every template it was
+        // given by 'init', and no fix-contract.md.
+        scaffoldAllBut(dir, PromptTemplateId.FIX_CONTRACT);
+
+        Map<PromptTemplateId, PromptTemplate> templates = loader.load(defaultPrompts(), dir);
+
+        assertThat(templates.get(PromptTemplateId.FIX_CONTRACT).rawText())
+                .isEqualTo(loader.bundledTextOf(PromptTemplateId.FIX_CONTRACT));
+    }
+
+    @Test
+    void aCustomisedFixContractFileIsUsedWhenItExists(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws java.io.IOException {
+        scaffoldAllBut(dir, PromptTemplateId.FIX_CONTRACT);
+        java.nio.file.Files.writeString(dir.resolve("prompts/fix-contract.md"), "My own correction. {{RULES}}");
+
+        assertThat(loader.load(defaultPrompts(), dir).get(PromptTemplateId.FIX_CONTRACT).rawText())
+                .isEqualTo("My own correction. {{RULES}}");
+    }
+
+    @Test
+    void anyOtherMissingTemplateStillStopsStartupBecauseItIsAlmostCertainlyATypo(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws java.io.IOException {
+        scaffoldAllBut(dir, PromptTemplateId.FIX_COMPILATION);
+
+        assertThatThrownBy(() -> loader.load(defaultPrompts(), dir))
+                .isInstanceOf(TemplateValidationException.class)
+                .hasMessageContaining("fix-compilation.md");
+    }
+
+    @Test
+    void theFixContractTemplateShowsThePreviousAnswerAndRestatesTheFormat() {
+        PromptTemplate template = loader.loadBundled().get(PromptTemplateId.FIX_CONTRACT);
+
+        assertThat(template.references(PromptPlaceholder.CONTRACT_VIOLATION)).isTrue();
+        assertThat(template.references(PromptPlaceholder.PREVIOUS_RESPONSE)).isTrue();
+        // The previous answer has its own ``` blocks; only a longer fence can hold it.
+        assertThat(template.rawText()).contains("````text\n{{PREVIOUS_RESPONSE}}\n````");
+    }
+
+    private void scaffoldAllBut(java.nio.file.Path dir, PromptTemplateId missing) throws java.io.IOException {
+        for (PromptTemplateId id : PromptTemplateId.values()) {
+            if (id == missing) {
+                continue;
+            }
+            java.nio.file.Path file = dir.resolve(id.configuredPath(defaultPrompts()));
+            java.nio.file.Files.createDirectories(file.getParent());
+            java.nio.file.Files.writeString(file, loader.bundledTextOf(id));
+        }
+    }
+
+    private static com.devmanchego.jtestforge.config.PromptsConfig defaultPrompts() {
+        return new com.devmanchego.jtestforge.config.PromptsConfig(
+                null, null, null, null, null, null, null, null, null, null, null, null);
+    }
 }

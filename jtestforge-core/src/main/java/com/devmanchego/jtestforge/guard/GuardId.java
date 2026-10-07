@@ -32,5 +32,10 @@ public enum GuardId {
     /** 10. The candidate turns a slice into an integration test. */
     ENVIRONMENT,
     /** 11. A persistence assertion read back through the first-level cache. */
-    PERSISTENCE_HYGIENE
+    PERSISTENCE_HYGIENE,
+    /**
+     * 12. The candidate's body is identical to another candidate in the same response, or to a
+     * test the class already has - only the method name differs. Needs no coverage data.
+     */
+    DUPLICATE_BODY
 }

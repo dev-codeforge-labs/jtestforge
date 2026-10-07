@@ -15,6 +15,12 @@ project:
   # from the pom's compiler settings (parents included), else from target/ bytecode.
   # Overridden per invocation by --java-version.
   javaVersion:
+  # Character encoding of the module's Java sources (UTF-8, ISO-8859-1, windows-1252...).
+  # Every test and production file is read and written back in it, so a legacy module saved
+  # as ISO-8859-1 keeps its accents byte for byte. Empty: detected from the pom chain
+  # (maven-compiler-plugin <encoding>, maven.compiler.encoding, project.build.sourceEncoding),
+  # else UTF-8 with a warning. Overridden per invocation by --source-encoding.
+  sourceEncoding:
   # Saved `mvn dependency:tree` output used INSTEAD of running Maven to resolve the
   # module's dependencies. One file may cover the whole multi-module application; the
   # module's block is found by its groupId:artifactId. Create it from the reactor root:
@@ -139,6 +145,48 @@ aiProvider:
       promptDelivery: stdin        # stdin | argument | file
       timeoutSeconds: 300
       transportRetries: 2
+    # Ollama, driven by command (`ollama run`). NOT yet verified against the fixture module
+    # (see usage.md, "Ollama (local model)") - treat the first run as an experiment.
+    #
+    # Build the model named below once, from tools/ollama/Modelfile:
+    #   ollama create jtestforge-qwen3-coder -f tools/ollama/Modelfile
+    # `ollama run` has no flag for num_ctx / temperature / num_predict, and Ollama silently
+    # drops the START of a prompt that does not fit num_ctx - the rules, the response
+    # contract and the class under test. A derived model is the only way to pin them here,
+    # and its num_ctx must hold context.maxPromptChars (60000 chars ~ 17-20k tokens) PLUS
+    # the answer: 32768 does, the Ollama default does not.
+    # Environment variables in `env` below would NOT help: they reach the `ollama run`
+    # client, not the server that actually loads the model.
+    # If the model named here does not exist, `ollama run` starts DOWNLOADING it inside the
+    # first unit instead of failing - check `ollama list` first.
+    ollama:
+      command: ollama
+      # --keepalive keeps the (large) model loaded between units; --hidethinking keeps a
+      # reasoning model's thoughts out of stdout; --verbose prints token counts and timings
+      # to stderr, where they end up in <stateDir>/transcripts/<unit>/N.stderr.log -
+      # "prompt eval count" close to num_ctx means the prompt was truncated.
+      args: ["run", "jtestforge-qwen3-coder", "--nowordwrap", "--hidethinking",
+             "--keepalive", "30m", "--verbose"]
+      promptDelivery: stdin        # stdin | argument | file
+      # The first call also pays the cold load of the model (~17 s for a 12 GB model that
+      # is already on disk).
+      timeoutSeconds: 900
+      transportRetries: 1
+      maxPromptChars: 60000
+    # Ollama over HTTP (its native /api/chat). NOT yet verified against the fixture module - see
+    # usage.md. Unlike `ollama run`, a request can set num_ctx / temperature / repeat_penalty per call -
+    # no derived model needed - and a prompt that does not fit num_ctx is refused instead of being
+    # silently cut. Uncomment, then set aiProvider.active: ollama-http (or generate -p ollama-http).
+    # ollama-http:
+    #   type: http
+    #   api: ollama                      # the only protocol for now
+    #   baseUrl: http://localhost:11434  # a host that is not this machine gets a warning: your code goes there
+    #   model: qwen3-coder:30b
+    #   options: { num_ctx: 32768, temperature: 0.7, num_predict: 4096 }
+    #   keepAlive: 30m
+    #   headers: {}                      # never written to a log
+    #   timeoutSeconds: 900
+    #   maxPromptChars: 60000
   # API keys are NEVER read from this file. They are inherited from the process
   # environment, exactly as the CLI itself expects them.
   #
@@ -176,6 +224,10 @@ prompts:
   killMutants:      prompts/kill-mutants.md
   fixCompilation:   prompts/fix-compilation.md
   fixAssertion:     prompts/fix-assertion.md
+  # Sent once per unit when an answer breaks the response format (no ```java block, a
+  # whole class, imports in the wrong place...). A project scaffolded before this file
+  # existed falls back to the bundled default, with a warning.
+  fixContract:      prompts/fix-contract.md
   # Spring tiers (see 7.4). Selected by the tier of the work unit.
   webSliceTests:    prompts/spring-web-slice.md
   dataSliceTests:   prompts/spring-data-slice.md
@@ -256,7 +308,13 @@ harden:
 execution:
   # NOT under target/ - 'mvn clean' would wipe the run state.
   stateDir: .jtestforge
+  # Keep a copy of every EXISTING test file, as it was before this run first touched it, under
+  # <stateDir>/backups/<runId>/ (same layout as the module). A safety net only: units are undone by
+  # subtracting what they added, never by restoring a copy. `clean` removes the copies.
   backupOriginalTests: true
+  # Do everything up to the AI call and stop: list the units a run would attempt and write each
+  # rendered prompt under <stateDir>/dry-run/. No AI call, no test file touched, run state left
+  # alone. Same as `generate --dry-run`.
   dryRun: false
   # Abort the run after this many consecutive discarded units (model is unhelpful).
   consecutiveFailureAbort: 5

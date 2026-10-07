@@ -6,8 +6,6 @@ import com.devmanchego.jtestforge.model.UnitStatus;
 import com.devmanchego.jtestforge.model.WorkUnit;
 import com.devmanchego.jtestforge.state.LockFile;
 import com.devmanchego.jtestforge.state.StateStore;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.Objects;
@@ -18,22 +16,23 @@ import java.util.Optional;
  * hook flushes state, releases the lock, and reverts any {@code IN_PROGRESS} unit's
  * partial file edits so the working tree is never left mid-merge."
  *
- * <p><b>Best-effort by design, backed by a robust fallback.</b> This class can only
- * revert what the state file <em>already recorded</em> for the interrupted unit -
- * {@code addedTests}/{@code addedImports} as of the last successful outcome write, not
- * necessarily whatever a mid-flight merge attempt has on disk at the exact instant the
- * process dies. That gap is not a bug to close here: resume reconciliation (§8.2.3)
- * independently re-parses every {@code DONE} unit's test file against what the state file
- * claims and resets anything that does not match, which is what makes "the filesystem is
- * the truth, not the JSON" hold regardless of what this handler managed to clean up.
+ * <p>What to revert comes from the state file, which a unit updates <em>before</em> each
+ * edit it makes to its test file ({@link UnitEditJournal}) - so whatever instant the
+ * process dies at, the interrupted unit names every method it may have merged. Reverting
+ * a method that never made it to the file is a no-op.
+ *
+ * <p><b>Still best-effort, backed by resume.</b> The hook runs on its own thread while the
+ * main thread may still be mid-write, so it can revert a file the main thread then writes
+ * again before the JVM halts. That race is deliberately not locked against: the unit stays
+ * {@code IN_PROGRESS} with its journal intact, and the next run's resume reverts it again
+ * through {@link PartialEditReverter} - which is what makes "the filesystem is the truth, not
+ * the JSON" hold regardless of what this handler managed to clean up.
  *
  * <p>Registered as a JVM shutdown hook via {@link #install()}. {@link #handleInterrupt()}
  * is also called directly by tests to simulate an interrupt deterministically - a real
  * {@code SIGINT} is not something a unit test can trigger reliably.
  */
 public final class InterruptHandler {
-
-    private static final Logger LOGGER = LoggerFactory.getLogger(InterruptHandler.class);
 
     private final StateStore stateStore;
     private final LockFile lockFile;
@@ -83,16 +82,6 @@ public final class InterruptHandler {
     }
 
     private void revertPartialEdits(WorkUnit unit) {
-        if (unit.addedTests().isEmpty() && unit.addedImports().isEmpty()) {
-            return;
-        }
-        Path testFile = resolveAgainstModule(unit.testFile());
-        LOGGER.warn("Reverting partial edits from interrupted unit {} in {}", unit.id(), testFile);
-        reverter.revert(testFile, unit.addedTests(), unit.addedImports());
-    }
-
-    private Path resolveAgainstModule(String testFile) {
-        Path path = Path.of(testFile);
-        return path.isAbsolute() ? path : modulePath.resolve(path);
+        new PartialEditReverter(reverter, modulePath).revert(unit);
     }
 }

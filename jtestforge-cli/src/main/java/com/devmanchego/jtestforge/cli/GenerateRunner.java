@@ -33,7 +33,9 @@ import com.devmanchego.jtestforge.orchestration.DiscoveryInputs;
 import com.devmanchego.jtestforge.orchestration.GenerateEngine;
 import com.devmanchego.jtestforge.orchestration.GenerateResult;
 import com.devmanchego.jtestforge.orchestration.SpringGenerationSupport;
+import com.devmanchego.jtestforge.orchestration.TestFileBackup;
 import com.devmanchego.jtestforge.orchestration.TierRestriction;
+import com.devmanchego.jtestforge.orchestration.TierScheduler;
 import com.devmanchego.jtestforge.orchestration.UnitContext;
 import com.devmanchego.jtestforge.orchestration.UnitPromptFactory;
 import com.devmanchego.jtestforge.orchestration.ValueGate;
@@ -141,6 +143,16 @@ final class GenerateRunner {
         return resolution;
     }
 
+    /** The module's source encoding - every test and production file is read and written in it. */
+    java.nio.charset.Charset sourceCharset() {
+        return resolution.sourceEncoding().charset();
+    }
+
+    /** A reverter that writes test files back in {@link #sourceCharset()}. */
+    TestClassReverter testClassReverter() {
+        return new TestClassReverter(sourceCharset());
+    }
+
     /**
      * Resolves the module's dependency list and decides its Spring stack - cheap next to
      * the baseline build, and needed before config validation can accurately judge
@@ -177,9 +189,9 @@ final class GenerateRunner {
         }
         Path mainSourceRoot = modulePath.resolve(config.project().mainSourceRoot());
         List<Path> classpath = resolution.compileClasspath();
-        var typeSolver = ProductionTypeSolvers.forModule(mainSourceRoot, classpath);
+        var typeSolver = ProductionTypeSolvers.forModule(mainSourceRoot, classpath, sourceCharset());
         this.productionClasses = new ProductionClassScanner(
-                typeSolver, mainSourceRoot, resolution.javaVersion().release()).scan();
+                typeSolver, mainSourceRoot, resolution.javaVersion().release(), sourceCharset()).scan();
 
         Map<String, ClassCoverage> baselineCoverage = measureBaselineCoverage();
 
@@ -212,6 +224,57 @@ final class GenerateRunner {
         return Map.copyOf(byFqn);
     }
 
+    /**
+     * {@code --dry-run} / {@code execution.dryRun}: everything {@code generate} does up to the AI
+     * call, and nothing after it. Discovery has already run (it builds the module and measures
+     * coverage, which only touches {@code target/}); this renders the exact prompt each unit
+     * would send, in the order they would run and within the same limits, and writes it under
+     * {@code <stateDir>/dry-run/} for the user to read. No AI provider is created or called, no
+     * test file is written, backed up or created, and {@code state.json} is not touched - so a
+     * later real run starts exactly as if this had never happened.
+     */
+    DryRunReport dryRun(List<DiscoveredUnit> discovered, String providerId,
+                        TierRestriction restriction, int maxUnitsOverride) {
+        Map<String, DiscoveredUnit> byUnitId = new LinkedHashMap<>();
+        for (DiscoveredUnit unit : discovered) {
+            byUnitId.put(unit.workUnit().id().format(), unit);
+        }
+        int limit = maxUnitsOverride > 0 ? maxUnitsOverride : config.execution().maxUnitsPerRun();
+        UnitPromptFactory factory = promptFactory(providerId);
+        Path promptDir = stateDir.resolve("dry-run");
+
+        List<WorkUnit> pending = discovered.stream().map(DiscoveredUnit::workUnit)
+                .filter(unit -> unit.status() == com.devmanchego.jtestforge.model.UnitStatus.PENDING)
+                .filter(unit -> restriction.allows(unit.tier()))
+                .toList();
+        List<String> wouldAttempt = new java.util.ArrayList<>();
+        int skipped = discovered.size() - pending.size();
+        for (WorkUnit unit : TierScheduler.order(pending)) {
+            if (!springTierState.isAvailable(unit.tier())) {
+                skipped++;
+                continue;
+            }
+            if (limit > 0 && wouldAttempt.size() >= limit) {
+                break;
+            }
+            UnitContext context = contextFor(byUnitId, unit);
+            String prompt = factory.generationPrompt(context);
+            Path promptFile = promptDir.resolve(unit.id().format().replaceAll("[:\\\\/*?\"<>|]", "_") + ".prompt.md");
+            try {
+                com.devmanchego.jtestforge.util.AtomicFileWriter.write(promptFile, prompt);
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException("Failed to write the dry-run prompt " + promptFile, e);
+            }
+            wouldAttempt.add(unit.id().format() + "  [" + (context.testClassExists() ? "adds to " : "creates ")
+                    + context.testFile().getFileName() + ", prompt " + prompt.length() + " chars]");
+        }
+        return new DryRunReport(wouldAttempt, skipped, promptDir);
+    }
+
+    /** What a dry run found: the units a real run would attempt, in order, and where their prompts are. */
+    record DryRunReport(List<String> wouldAttempt, int notAttempted, Path promptDirectory) {
+    }
+
     GenerateResult run(List<DiscoveredUnit> discovered, AiProvider provider, String providerId,
                        Duration providerTimeout, TierRestriction restriction, int maxUnitsOverride,
                        boolean restart) {
@@ -225,26 +288,25 @@ final class GenerateRunner {
         ContextKeyStabilityTracker tracker =
                 new ContextKeyStabilityTracker(config.spring().maxContextLoadsPerRun());
         SpringGenerationSupport springSupport = new SpringGenerationSupport(
-                new ContextKeyGuard(), new MockBeanEscalation(), new MockBeanSynthesizer(),
+                new ContextKeyGuard(), new MockBeanEscalation(), new MockBeanSynthesizer(sourceCharset()),
                 new MockBeanSetResolver(), new ContextKeyModel(), tracker);
 
         DefaultUnitProcessor processor = new DefaultUnitProcessor(
                 provider,
                 new TranscriptWriter(stateDir, progress, verboseSink),
-                new UnitPromptFactory(new PromptTemplateLoader().load(config.prompts(), configBaseDir),
-                        new PromptRenderer(effectiveMaxPromptChars(providerId)),
-                        new ContextAssembler(config.context())),
+                promptFactory(providerId),
                 new ResponseParser(),
-                new StaticQualityGuards(config.generate(), config.spring()),
-                new TestClassMerger(),
-                new TestClassReverter(),
+                new StaticQualityGuards(config.generate(), config.spring(), sourceCharset()),
+                new TestClassMerger(sourceCharset()),
+                testClassReverter(),
                 moduleBuild,
                 new CoverageAndGapAcceptanceGate(moduleBuild, new CoverageDeltaCalculator(),
                         new ValueGate(config.generate())),
                 config.generate(),
                 providerTimeout,
                 springSupport,
-                progress);
+                progress,
+                sourceCharset());
 
         var executionConfig = maxUnitsOverride > 0
                 ? new com.devmanchego.jtestforge.config.ExecutionConfig(
@@ -253,8 +315,18 @@ final class GenerateRunner {
                         maxUnitsOverride)
                 : config.execution();
 
-        GenerateEngine engine = new GenerateEngine(processor, moduleBuild, stateStore, executionConfig, tracker, progress);
+        TestFileBackup backup = config.execution().backupOriginalTests()
+                ? new TestFileBackup(stateDir.resolve("backups").resolve(initialState.runId()), modulePath)
+                : null;
+        GenerateEngine engine = new GenerateEngine(
+                processor, moduleBuild, stateStore, executionConfig, tracker, progress, backup);
         return engine.run(initialState, workUnit -> contextFor(byUnitId, workUnit), restriction);
+    }
+
+    private UnitPromptFactory promptFactory(String providerId) {
+        return new UnitPromptFactory(new PromptTemplateLoader().load(config.prompts(), configBaseDir),
+                new PromptRenderer(effectiveMaxPromptChars(providerId)),
+                new ContextAssembler(config.context(), sourceCharset()));
     }
 
     /**
@@ -262,7 +334,7 @@ final class GenerateRunner {
      * {@code context.maxPromptChars} - a locally hosted model can need a far smaller (or
      * larger) context budget than a hosted CLI, and that is a property of the provider.
      */
-    private int effectiveMaxPromptChars(String providerId) {
+    int effectiveMaxPromptChars(String providerId) {
         com.devmanchego.jtestforge.config.ProviderConfig providerConfig =
                 config.aiProvider().providers().get(providerId);
         Integer override = providerConfig == null ? null : providerConfig.maxPromptChars();
@@ -278,14 +350,12 @@ final class GenerateRunner {
         if (!restart) {
             var existing = stateStore.load();
             if (existing.isPresent()) {
-                ResumeReconciler reconciler = new ResumeReconciler(new TestClassScanner()::testMethodNames);
+                ResumeReconciler reconciler = new ResumeReconciler(new TestClassScanner(sourceCharset())::testMethodNames);
                 var reconciliation = reconciler.reconcile(existing.get(), modulePath, configHash);
-                for (var unitId : reconciliation.unitsNeedingRevert()) {
-                    reconciliation.state().unit(unitId).ifPresent(unit -> {
-                        Path testFile = resolveAgainstModule(unit.testFile());
-                        new TestClassReverter().revert(testFile, unit.addedTests(), unit.addedImports());
-                    });
-                }
+                // The loaded state, not reconciliation.state(): reconciling resets each
+                // interrupted unit and clears the very lists that say what to revert.
+                new com.devmanchego.jtestforge.orchestration.PartialEditReverter(testClassReverter(), modulePath)
+                        .revert(existing.get(), reconciliation.unitsNeedingRevert());
                 return reconciliation.state();
             }
         }
@@ -294,11 +364,6 @@ final class GenerateRunner {
                         discovered.stream().map(DiscoveredUnit::workUnit).toList())
                 .withBaseline(new Baseline(aggregateLineCoverage(), aggregateBranchCoverage(),
                         null, totalOpenGaps(discovered)));
-    }
-
-    private Path resolveAgainstModule(String testFile) {
-        Path path = Path.of(testFile);
-        return path.isAbsolute() ? path : modulePath.resolve(path);
     }
 
     private int totalOpenGaps(List<DiscoveredUnit> discovered) {
@@ -338,7 +403,7 @@ final class GenerateRunner {
         if (discovered == null) {
             throw new IllegalStateException("No discovered unit matches " + workUnit.id());
         }
-        var testClassInfo = new TestClassScanner().scan(discovered.testFile()).orElse(null);
+        var testClassInfo = new TestClassScanner(sourceCharset()).scan(discovered.testFile()).orElse(null);
         return new UnitContext(workUnit, discovered.productionClass(), discovered.targetMethod(),
                 discovered.testFile(), discovered.testClassSimpleName(), testClassInfo,
                 discovered.gaps(), discovered.coverageBefore(), springFacts, frameworkVersions,
@@ -347,7 +412,7 @@ final class GenerateRunner {
     }
 
     private TestClassLocator testClassLocator() {
-        return new TestClassLocator(new TestClassScanner(),
+        return new TestClassLocator(new TestClassScanner(sourceCharset()),
                 modulePath.resolve(config.project().testSourceRoot()),
                 config.project().testClassSuffix(), config.project().testClassSuffixByTier());
     }

@@ -17,8 +17,13 @@ before it is kept:
 3. **Mutation coverage** *(opt-in, `harden` pass)* — for methods that are covered but
    whose tests don't actually detect defects, evidenced by mutants PIT proves survive.
 
-A generated candidate that doesn't move one of these numbers is discarded, not kept
-for style points.
+Every candidate has to compile, pass and survive the quality guards before it is kept. By
+default (`generate.requireCoverageGain: false`) that is all it takes - a test that compiles and
+passes is kept even if it moves no number, and coverage is not even measured per unit. Set
+`requireCoverageGain: true` to hold candidates to the stricter rule: one that doesn't move
+coverage (or, for a Spring tier, close a framework-semantic gap) is discarded, not kept for
+style points. Either way, read what a model kept - a unit marked `DONE` is not a verdict on
+the tests' quality.
 
 ## Status
 
@@ -40,7 +45,8 @@ Full detail on every command, flag, exit code and config option is in
 - Java 21
 - The target project: a Maven module (a `pom.xml`) that builds green before a run
 - An AI CLI on `PATH` for `generate` — `claude`, `gemini`, `copilot` or `codex`, all
-  verified; see [usage.md](usage.md#ai-providers) for how to add another
+  verified; a local Ollama model is also supported, by command or over HTTP (see
+  [usage.md](usage.md#ollama-local-model)); see [usage.md](usage.md#ai-providers) for how to add another
 
 ## Building
 
@@ -72,8 +78,8 @@ For each eligible production method, `generate`:
    assertions, mock-only tests, disallowed wildcard imports...).
 4. Merges surviving candidates into the test class's AST and compiles.
 5. Runs only the new test methods, scoped — not the whole suite yet.
-6. Checks the value gate: did coverage actually move, or did this close a
-   framework-semantic gap the class couldn't otherwise prove?
+6. Checks the value gate - when `requireCoverageGain` is on: did coverage actually move, or
+   did this close a framework-semantic gap the class couldn't otherwise prove?
 7. Keeps it, or reverts and records why it was discarded.
 
 A method that already has a passing test and 100% coverage is not necessarily done —

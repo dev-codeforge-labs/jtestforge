@@ -23,15 +23,29 @@ final class TestClassEditing {
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21));
     }
 
-    static Optional<String> readSource(Path testFile) {
+    /**
+     * The file's text in {@code charset}, or empty if it is missing or not valid in that encoding.
+     * Strict on purpose: the lenient default would swap undecodable bytes for U+FFFD, and the edit
+     * that follows rewrites the whole file - so the developer's accents would be replaced for good.
+     */
+    static Optional<String> readSource(Path testFile, java.nio.charset.Charset charset) {
         if (!Files.isRegularFile(testFile)) {
             return Optional.empty();
         }
         try {
-            return Optional.of(Files.readString(testFile));
+            return Optional.of(charset.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(testFile))).toString());
         } catch (IOException e) {
+            // includes CharacterCodingException
             return Optional.empty();
         }
+    }
+
+    /** Whether every character of {@code text} can be written in {@code charset}. */
+    static boolean canEncode(java.nio.charset.Charset charset, String text) {
+        return charset.newEncoder().canEncode(text);
     }
 
     static Optional<CompilationUnit> parse(JavaParser parser, String source) {

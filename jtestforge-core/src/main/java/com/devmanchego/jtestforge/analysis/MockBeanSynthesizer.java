@@ -35,6 +35,16 @@ import java.util.Set;
 public final class MockBeanSynthesizer {
 
     private final JavaParser javaParser = TestClassEditing.newParser();
+    private final java.nio.charset.Charset charset;
+
+    public MockBeanSynthesizer() {
+        this(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** @param charset the module's source encoding: test files are read and written back in it */
+    public MockBeanSynthesizer(java.nio.charset.Charset charset) {
+        this.charset = java.util.Objects.requireNonNull(charset, "charset");
+    }
 
     /**
      * @param mockBeanAnnotationFqn the annotation to declare each field with -
@@ -45,7 +55,7 @@ public final class MockBeanSynthesizer {
      */
     public List<String> synthesize(
             Path testFile, List<MockBeanDeclaration> mockBeans, String mockBeanAnnotationFqn) {
-        Optional<String> source = TestClassEditing.readSource(testFile);
+        Optional<String> source = TestClassEditing.readSource(testFile, charset);
         if (source.isEmpty()) {
             return List.of();
         }
@@ -160,7 +170,7 @@ public final class MockBeanSynthesizer {
 
     private void write(Path testFile, String content) {
         try {
-            AtomicFileWriter.write(testFile, content);
+            AtomicFileWriter.write(testFile, content, charset);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to synthesise mock beans into " + testFile, e);
         }

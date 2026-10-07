@@ -23,10 +23,12 @@ public final class ConfigValidator {
 
         checkModulePath(config, errors);
         checkDependencyInputs(config, context, errors);
-        checkActiveProviderResolvable(config, context, errors);
+        checkActiveProviderResolvable(config, context, errors, warnings);
         boolean springActive = checkSpringEnabled(config, context, errors, warnings);
         checkAlwaysRequiredPrompts(config, context, errors, springActive);
         checkSpringTierPrompts(config, context, errors, springActive);
+        checkFixContractPrompt(config, context, warnings);
+        checkArgumentDeliveryThroughBatchLauncher(config, context, warnings);
         checkStandaloneWrapperJar(config, context, errors);
         checkStateDirNotUnderTarget(config, errors);
         checkPositiveValues(config, errors);
@@ -72,10 +74,25 @@ public final class ConfigValidator {
             errors.add(new ConfigViolation("project.javaVersion",
                     "is not a Java version: \"" + javaVersion + "\" (expected e.g. 8, 1.8, 11, 17)."));
         }
+        String sourceEncoding = project.sourceEncoding();
+        if (sourceEncoding != null && !sourceEncoding.isBlank() && !isSupportedCharset(sourceEncoding.strip())) {
+            errors.add(new ConfigViolation("project.sourceEncoding",
+                    "is not a character encoding this JVM supports: \"" + sourceEncoding
+                            + "\" (expected e.g. UTF-8, ISO-8859-1, windows-1252)."));
+        }
+    }
+
+    private static boolean isSupportedCharset(String name) {
+        try {
+            return java.nio.charset.Charset.isSupported(name);
+        } catch (IllegalArgumentException illegalName) {
+            return false;
+        }
     }
 
     private void checkActiveProviderResolvable(
-            JTestForgeConfig config, ValidationContext context, List<ConfigViolation> errors) {
+            JTestForgeConfig config, ValidationContext context,
+            List<ConfigViolation> errors, List<ConfigViolation> warnings) {
         String active = config.aiProvider().active();
         if (active == null || active.isBlank()) {
             errors.add(new ConfigViolation("aiProvider.active", "is required."));
@@ -87,9 +104,70 @@ public final class ConfigValidator {
                     "names provider \"" + active + "\", which is not defined under aiProvider.providers."));
             return;
         }
-        if (!ExecutableResolver.isResolvable(provider.command(), context.pathDirectories())) {
-            errors.add(new ConfigViolation("aiProvider.providers." + active + ".command",
+        String path = "aiProvider.providers." + active;
+        if (provider.isHttp()) {
+            checkHttpProvider(path, provider, errors, warnings);
+            return;
+        }
+        if (provider.command() == null || provider.command().isBlank()) {
+            errors.add(new ConfigViolation(path + ".command", "is required for a provider of type process."));
+        } else if (!ExecutableResolver.isResolvable(provider.command(), context.pathDirectories())) {
+            errors.add(new ConfigViolation(path + ".command",
                     "not found on PATH and not an existing path: " + provider.command()));
+        }
+    }
+
+    /**
+     * An HTTP provider is judged on what it needs, not on a command: the endpoint and the model
+     * are required, a stray {@code command} is refused (it would never run, and leaving it would
+     * suggest it does), and an endpoint that is not this machine is warned about because the
+     * prompt - the developer's source code - is sent to it.
+     */
+    private void checkHttpProvider(String path, ProviderConfig provider,
+                                   List<ConfigViolation> errors, List<ConfigViolation> warnings) {
+        if (provider.command() != null && !provider.command().isBlank()) {
+            errors.add(new ConfigViolation(path + ".command", "is not allowed for a provider of type http "
+                    + "(it is launched as a process only for type process)."));
+        }
+        if (!"ollama".equals(provider.api())) {
+            errors.add(new ConfigViolation(path + ".api", "is not supported: \"" + provider.api()
+                    + "\" (only \"ollama\" for now)."));
+        }
+        if (provider.model() == null || provider.model().isBlank()) {
+            errors.add(new ConfigViolation(path + ".model", "is required for a provider of type http."));
+        }
+        checkBaseUrl(path, provider.baseUrl(), errors, warnings);
+        if (!provider.args().isEmpty()) {
+            warnings.add(new ConfigViolation(path + ".args", "is ignored for a provider of type http."));
+        }
+    }
+
+    private void checkBaseUrl(String path, String baseUrl,
+                              List<ConfigViolation> errors, List<ConfigViolation> warnings) {
+        if (baseUrl == null || baseUrl.isBlank()) {
+            errors.add(new ConfigViolation(path + ".baseUrl", "is required for a provider of type http."));
+            return;
+        }
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(baseUrl.strip());
+        } catch (IllegalArgumentException e) {
+            uri = null;
+        }
+        boolean usable = uri != null && uri.getHost() != null
+                && ("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()));
+        if (!usable) {
+            errors.add(new ConfigViolation(path + ".baseUrl",
+                    "is not an http(s) URL with a host: \"" + baseUrl + "\" (expected e.g. http://localhost:11434)."));
+            return;
+        }
+        String host = uri.getHost().toLowerCase(java.util.Locale.ROOT);
+        boolean local = host.equals("localhost") || host.endsWith(".localhost") || host.equals("127.0.0.1")
+                || host.equals("[::1]") || host.equals("::1");
+        if (!local) {
+            warnings.add(new ConfigViolation(path + ".baseUrl", "points at " + uri.getHost()
+                    + ", not this machine: every prompt - including the full source of the classes under "
+                    + "test - is sent there."));
         }
     }
 
@@ -160,6 +238,47 @@ public final class ConfigValidator {
         }
         if (!Files.isReadable(resolveAgainstBase(context, rawPath))) {
             errors.add(new ConfigViolation(path, "file not found or not readable: " + rawPath));
+        }
+    }
+
+    /**
+     * A warning, not an error: {@code prompts.fixContract} was added after {@code jtestforge init}
+     * may already have scaffolded a project, and a missing file falls back to the bundled default
+     * (see {@code PromptTemplateId#fallsBackToBundledWhenMissing}). Worth saying, since an edit the
+     * user believes they made would otherwise silently not apply.
+     */
+    private void checkFixContractPrompt(
+            JTestForgeConfig config, ValidationContext context, List<ConfigViolation> warnings) {
+        String rawPath = config.prompts().fixContract();
+        if (rawPath != null && !rawPath.isBlank() && !Files.isReadable(resolveAgainstBase(context, rawPath))) {
+            warnings.add(new ConfigViolation("prompts.fixContract", "file not found: " + rawPath
+                    + " - the bundled default is used; run 'jtestforge init' to scaffold it."));
+        }
+    }
+
+    /**
+     * {@code promptDelivery: argument} puts the whole prompt - the developer's source code - on the
+     * command line. When the AI CLI is a {@code .cmd}/{@code .bat} launcher (Windows runs those
+     * through {@code cmd.exe}), characters such as {@code & | < > ^ %} and quotes in that code are
+     * interpreted by the shell: the prompt gets mangled, or worse. {@code stdin} (the default) and
+     * {@code file} do not have the problem. A warning, not an error: a launcher that is really an
+     * executable with a misleading name, or a platform where it is harmless, should still run.
+     */
+    private void checkArgumentDeliveryThroughBatchLauncher(
+            JTestForgeConfig config, ValidationContext context, List<ConfigViolation> warnings) {
+        String active = config.aiProvider().active();
+        ProviderConfig provider = active == null ? null : config.aiProvider().providers().get(active);
+        if (provider == null || provider.isHttp() || provider.promptDelivery() != PromptDelivery.ARGUMENT) {
+            return;
+        }
+        String launcher = ExecutableResolver.resolve(provider.command(), context.pathDirectories())
+                .map(java.nio.file.Path::toString).orElse(provider.command());
+        String lower = launcher.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
+            warnings.add(new ConfigViolation("aiProvider.providers." + active + ".promptDelivery",
+                    "is \"argument\" but the command (" + launcher + ") is a batch launcher: cmd.exe will interpret "
+                            + "& | < > ^ % and quotes in the prompt, and it is subject to its ~8191-character limit. "
+                            + "Use \"stdin\" (or \"file\") instead."));
         }
     }
 

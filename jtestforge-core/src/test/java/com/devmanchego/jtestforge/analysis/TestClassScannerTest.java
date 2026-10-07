@@ -196,4 +196,71 @@ class TestClassScannerTest {
         Files.writeString(file, source);
         return file;
     }
+
+    // --- inspect(): absent, parsed, unreadable --------------------------------------------
+
+    @Test
+    void aMissingFileIsAbsent(@TempDir Path dir) {
+        assertThat(scanner.inspect(dir.resolve("NoSuchTest.java"))).isInstanceOf(TestFileScan.Absent.class);
+    }
+
+    @Test
+    void aFileWithOnlyWhitespaceIsAbsentSinceThereIsNothingInItToLose(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("EmptyTest.java");
+        Files.writeString(file, "  \n\n ");
+
+        assertThat(scanner.inspect(file)).isInstanceOf(TestFileScan.Absent.class);
+    }
+
+    @Test
+    void aReadableTestClassIsParsed(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("PaymentServiceTest.java");
+        Files.writeString(file, """
+                package com.acme;
+                class PaymentServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void t() {}
+                }
+                """);
+
+        assertThat(scanner.inspect(file)).isInstanceOfSatisfying(TestFileScan.Parsed.class, parsed ->
+                assertThat(parsed.info().testMethodNames()).containsExactly("t"));
+    }
+
+    @Test
+    void aFileThatDoesNotParseIsUnreadableNotAbsentAndScanDoesNotPretendOtherwise(@TempDir Path dir)
+            throws IOException {
+        // The regression this exists for: an unparseable file used to look exactly like a
+        // missing one, and the generation loop then wrote a skeleton over it.
+        Path file = dir.resolve("BrokenTest.java");
+        Files.writeString(file, """
+                package com.acme;
+                class BrokenTest {
+                    @org.junit.jupiter.api.Test
+                    void t() { this is not java }
+                }
+                """);
+
+        assertThat(scanner.inspect(file)).isInstanceOfSatisfying(TestFileScan.Unreadable.class, unreadable ->
+                assertThat(unreadable.reason()).containsIgnoringCase("parse"));
+        assertThat(scanner.scan(file)).isEmpty();
+    }
+
+    @Test
+    void aFileInAnotherEncodingIsUnreadableWithAReasonThatSaysSo(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("LegacyTest.java");
+        // "// Año" in ISO-8859-1: the 0xF1 byte is not valid UTF-8.
+        Files.write(file, "// Año\nclass LegacyTest {}\n".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+
+        assertThat(scanner.inspect(file)).isInstanceOfSatisfying(TestFileScan.Unreadable.class, unreadable ->
+                assertThat(unreadable.reason()).contains("UTF-8"));
+    }
+
+    @Test
+    void aFileWithNoTopLevelClassIsUnreadable(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("NotAClassTest.java");
+        Files.writeString(file, "package com.acme;\nenum NotAClassTest { A }\n");
+
+        assertThat(scanner.inspect(file)).isInstanceOf(TestFileScan.Unreadable.class);
+    }
 }

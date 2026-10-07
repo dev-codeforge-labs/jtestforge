@@ -58,6 +58,12 @@ public final class PromptTemplateLoader {
         Map<PromptTemplateId, PromptTemplate> templates = new EnumMap<>(PromptTemplateId.class);
         for (PromptTemplateId id : PromptTemplateId.values()) {
             Path file = resolve(baseDir, id.configuredPath(prompts));
+            if (id.fallsBackToBundledWhenMissing() && !Files.exists(file)) {
+                LOGGER.warn("Prompt template {} not found; using the bundled default. Run 'jtestforge init' to "
+                        + "scaffold it (existing files are never overwritten) and customise it.", file);
+                templates.put(id, new PromptTemplate(id, readBundled(id), "bundled:" + id.bundledResourcePath()));
+                continue;
+            }
             templates.put(id, new PromptTemplate(id, readFile(file), file.toString()));
         }
         warnAboutUnusedPlaceholders(templates);

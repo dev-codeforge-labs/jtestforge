@@ -39,6 +39,15 @@ public enum UnitStatus {
     SKIPPED_TIER_UNAVAILABLE(RetryPolicy.IF_CLASSPATH_CHANGED),
 
     /**
+     * The test class the unit would write to exists but could not be read or parsed (an
+     * encoding other than UTF-8, a syntax JavaParser does not support...), so it is left
+     * untouched rather than mistaken for a missing file and overwritten. The reason is recorded
+     * on the unit. Nothing was learned about the unit itself, hence {@code ALWAYS}: once the
+     * file is fixed, a {@code --restart} discovers it again as an ordinary pending unit.
+     */
+    SKIPPED_TEST_FILE_UNREADABLE(RetryPolicy.ALWAYS),
+
+    /**
      * Spring tiers: the candidate required a context-key change (§7.6). The class's
      * mock-bean set is re-synthesised once, after which the unit returns to
      * {@link #PENDING}.

@@ -47,9 +47,32 @@ public final class TestClassMerger {
     private static final String DEFAULT_INDENT = "    ";
 
     private final JavaParser javaParser = TestClassEditing.newParser();
+    private final java.nio.charset.Charset charset;
+
+    public TestClassMerger() {
+        this(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** @param charset the module's source encoding: test files are read and written back in it */
+    public TestClassMerger(java.nio.charset.Charset charset) {
+        this.charset = java.util.Objects.requireNonNull(charset, "charset");
+    }
 
     public MergeResult merge(Path testFile, List<TestCandidate> candidates) {
-        Optional<String> source = TestClassEditing.readSource(testFile);
+        return merge(testFile, candidates, planned -> {
+        });
+    }
+
+    /**
+     * As {@link #merge(Path, List)}, handing {@code beforeWrite} exactly what is about to be
+     * added - the method names and the imports - after every check has passed and immediately
+     * before the file is written. It is not called for a refused batch, nor when there is
+     * nothing to write. If it throws, nothing is written: an edit that could not be recorded
+     * must not happen (this is what the run's write-ahead journal relies on).
+     */
+    public MergeResult merge(Path testFile, List<TestCandidate> candidates,
+                             java.util.function.Consumer<MergeResult> beforeWrite) {
+        Optional<String> source = TestClassEditing.readSource(testFile, charset);
         if (source.isEmpty()) {
             return MergeResult.rejected("test file does not exist or could not be read: " + testFile);
         }
@@ -82,10 +105,17 @@ public final class TestClassMerger {
         List<String> addedTestNames = insertMethods(editor, testClass, parsedCandidates);
         List<String> addedImports = insertMissingImports(editor, compilationUnit, candidates);
 
+        MergeResult result = MergeResult.merged(addedTestNames, addedImports);
         if (editor.hasEdits()) {
-            write(testFile, editor.apply());
+            String merged = editor.apply();
+            if (!TestClassEditing.canEncode(charset, merged)) {
+                return MergeResult.rejected("the generated test uses characters that this module's source "
+                        + "encoding (" + charset.name() + ") cannot represent - writing it would corrupt them");
+            }
+            beforeWrite.accept(result);
+            write(testFile, merged);
         }
-        return MergeResult.merged(addedTestNames, addedImports);
+        return result;
     }
 
     private List<String> insertMethods(
@@ -220,7 +250,7 @@ public final class TestClassMerger {
 
     private void write(Path testFile, String content) {
         try {
-            AtomicFileWriter.write(testFile, content);
+            AtomicFileWriter.write(testFile, content, charset);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write merged test class to " + testFile, e);
         }
