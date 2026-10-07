@@ -113,4 +113,74 @@ class ConfigLoaderTest {
     private Path classpathResource(String resourcePath) throws URISyntaxException {
         return Path.of(getClass().getClassLoader().getResource(resourcePath).toURI());
     }
+
+    @Test
+    void sourceEncodingBindsFromTheProjectBlockAndIsNullWhenOmitted(@TempDir Path dir) throws IOException {
+        Path withEncoding = dir.resolve("with.yaml");
+        Files.writeString(withEncoding, "project:\n  modulePath: .\n  sourceEncoding: ISO-8859-1\n");
+        Path without = dir.resolve("without.yaml");
+        Files.writeString(without, "project:\n  modulePath: .\n");
+
+        assertThat(loader.load(withEncoding, Map.of()).config().project().sourceEncoding()).isEqualTo("ISO-8859-1");
+        assertThat(loader.load(without, Map.of()).config().project().sourceEncoding()).isNull();
+    }
+
+    @Test
+    void anHttpProviderBindsEveryFieldAndDefaultsItsApiToOllama(@TempDir Path dir) throws IOException {
+        Path yaml = dir.resolve("http.yaml");
+        Files.writeString(yaml, """
+                project:
+                  modulePath: .
+                aiProvider:
+                  active: ollama-http
+                  providers:
+                    ollama-http:
+                      type: http
+                      baseUrl: http://localhost:11434
+                      model: qwen3-coder:30b
+                      keepAlive: 30m
+                      options:
+                        num_ctx: 32768
+                        temperature: 0.7
+                      headers:
+                        X-Proxy-Token: abc
+                """);
+
+        ProviderConfig provider = loader.load(yaml, Map.of()).config().aiProvider().providers().get("ollama-http");
+
+        assertThat(provider.type()).isEqualTo(ProviderType.HTTP);
+        assertThat(provider.isHttp()).isTrue();
+        assertThat(provider.api()).isEqualTo("ollama");
+        assertThat(provider.baseUrl()).isEqualTo("http://localhost:11434");
+        assertThat(provider.model()).isEqualTo("qwen3-coder:30b");
+        assertThat(provider.keepAlive()).isEqualTo("30m");
+        assertThat(provider.options()).containsEntry("num_ctx", 32768).containsEntry("temperature", 0.7);
+        assertThat(provider.headers()).containsEntry("X-Proxy-Token", "abc");
+        assertThat(provider.command()).isNull();
+    }
+
+    @Test
+    void aProviderWithoutATypeIsStillAProcessProviderSoExistingConfigsKeepWorking(@TempDir Path dir)
+            throws IOException {
+        Path yaml = dir.resolve("process.yaml");
+        Files.writeString(yaml, """
+                project:
+                  modulePath: .
+                aiProvider:
+                  active: claude
+                  providers:
+                    claude:
+                      command: claude
+                      args: ["-p"]
+                """);
+
+        ProviderConfig provider = loader.load(yaml, Map.of()).config().aiProvider().providers().get("claude");
+
+        assertThat(provider.type()).isEqualTo(ProviderType.PROCESS);
+        assertThat(provider.isHttp()).isFalse();
+        assertThat(provider.api()).isNull();
+        assertThat(provider.options()).isEmpty();
+        assertThat(provider.headers()).isEmpty();
+        assertThat(provider.command()).isEqualTo("claude");
+    }
 }

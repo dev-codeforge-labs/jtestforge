@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -50,6 +51,7 @@ public final class GenerateEngine {
     private final ExecutionConfig executionConfig;
     private final ContextKeyStabilityTracker contextTracker;
     private final Consumer<String> progress;
+    private final TestFileBackup backup;
 
     public GenerateEngine(UnitProcessor unitProcessor, ModuleBuild moduleBuild,
                           StateStore stateStore, ExecutionConfig executionConfig) {
@@ -68,6 +70,17 @@ public final class GenerateEngine {
     public GenerateEngine(UnitProcessor unitProcessor, ModuleBuild moduleBuild, StateStore stateStore,
                           ExecutionConfig executionConfig, ContextKeyStabilityTracker contextTracker,
                           Consumer<String> progress) {
+        this(unitProcessor, moduleBuild, stateStore, executionConfig, contextTracker, progress, null);
+    }
+
+    /**
+     * @param backup keeps a copy of each existing test file as it was before this run first
+     *               touches it ({@code execution.backupOriginalTests}); null for none
+     */
+    public GenerateEngine(UnitProcessor unitProcessor, ModuleBuild moduleBuild, StateStore stateStore,
+                          ExecutionConfig executionConfig, ContextKeyStabilityTracker contextTracker,
+                          Consumer<String> progress, TestFileBackup backup) {
+        this.backup = backup;
         this.unitProcessor = Objects.requireNonNull(unitProcessor, "unitProcessor");
         this.moduleBuild = Objects.requireNonNull(moduleBuild, "moduleBuild");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
@@ -137,8 +150,16 @@ public final class GenerateEngine {
             unitsProcessed++;
             reportProgress("[" + index + "/" + total + "] " + unit.id().format());
 
+            backUpTestFile(unit);
             long startedAt = System.currentTimeMillis();
-            UnitOutcome outcome = processSafely(unit, contextLookup);
+            // The unit's edits reach state.json before they reach the test file (§8.2.1), so a
+            // kill at any instant leaves an IN_PROGRESS unit that names exactly what to revert.
+            AtomicReference<RunState> live = new AtomicReference<>(state);
+            WorkUnitId unitId = unit.id();
+            UnitEditJournal journal = (addedTests, addedImports) -> live.updateAndGet(current ->
+                    stateStore.updateUnit(current, current.unit(unitId).orElseThrow().withAdded(addedTests, addedImports)));
+            UnitOutcome outcome = processSafely(unit, contextLookup, journal);
+            state = live.get();
             long durationMillis = System.currentTimeMillis() - startedAt;
             state = stateStore.updateUnit(state, applyOutcome(state, unit.id(), outcome, durationMillis));
             reportProgress("  -> " + outcome.status()
@@ -147,6 +168,9 @@ public final class GenerateEngine {
             if (outcome.succeeded()) {
                 anythingKept = true;
                 consecutiveFailures = 0;
+            } else if (outcome.status() == UnitStatus.SKIPPED_TEST_FILE_UNREADABLE) {
+                // Says nothing about whether the model is useful - the AI was never asked.
+                continue;
             } else if (++consecutiveFailures >= executionConfig.consecutiveFailureAbort()) {
                 LOGGER.error("Aborting: {} consecutive units produced nothing usable.", consecutiveFailures);
                 return new GenerateResult(state,
@@ -173,9 +197,10 @@ public final class GenerateEngine {
      * status of its own: like a transport failure, nothing was learned about the unit
      * itself, and it should be retried on the next run (§8.1's ALWAYS retry policy).
      */
-    private UnitOutcome processSafely(WorkUnit unit, Function<WorkUnit, UnitContext> contextLookup) {
+    private UnitOutcome processSafely(WorkUnit unit, Function<WorkUnit, UnitContext> contextLookup,
+                                      UnitEditJournal journal) {
         try {
-            return unitProcessor.process(contextLookup.apply(unit));
+            return unitProcessor.process(contextLookup.apply(unit), journal);
         } catch (RuntimeException e) {
             LOGGER.warn("Unit {} failed unexpectedly", unit.id(), e);
             return UnitOutcome.failed(UnitStatus.PROVIDER_ERROR,
@@ -248,6 +273,24 @@ public final class GenerateEngine {
             }
         }
         return TierScheduler.order(pending);
+    }
+
+    /**
+     * Before the unit can write anything. A failed copy is reported and the run carries on:
+     * the backup is a safety net, and a read-only backup directory is not a reason to generate
+     * nothing - but it must not be silent, since the user asked for it.
+     */
+    private void backUpTestFile(WorkUnit unit) {
+        if (backup == null) {
+            return;
+        }
+        try {
+            backup.backupOnce(unit.testFile()).ifPresent(copy ->
+                    reportProgress("  backed up " + unit.testFile() + " -> " + copy));
+        } catch (RuntimeException e) {
+            LOGGER.warn("Could not back up {} before changing it: {}", unit.testFile(), e.getMessage());
+            reportProgress("  WARNING: could not back up " + unit.testFile() + ": " + e.getMessage());
+        }
     }
 
     private void reportProgress(String message) {

@@ -34,6 +34,12 @@ public final class ProductionTypeSolvers {
     }
 
     public static TypeSolver forModule(Path mainSourceRoot, List<Path> compileClasspath) {
+        return forModule(mainSourceRoot, compileClasspath, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** @param sourceCharset the module's source encoding, used when the solver parses its own sources */
+    public static TypeSolver forModule(Path mainSourceRoot, List<Path> compileClasspath,
+                                       java.nio.charset.Charset sourceCharset) {
         CombinedTypeSolver combined = new CombinedTypeSolver();
         // false = resolve any class visible via reflection, not only java.*/javax.*.
         // The no-arg constructor defaults to JRE-only, which would silently fail to
@@ -42,7 +48,8 @@ public final class ProductionTypeSolvers {
         // classpath (and any JarTypeSolver/ClassLoaderTypeSolver added below) exists to
         // cover.
         combined.add(new ReflectionTypeSolver(false));
-        combined.add(new JavaParserTypeSolver(mainSourceRoot));
+        combined.add(new JavaParserTypeSolver(mainSourceRoot, new com.github.javaparser.ParserConfiguration()
+                .setCharacterEncoding(sourceCharset)));
         for (Path entry : compileClasspath) {
             combined.add(solverFor(entry));
         }

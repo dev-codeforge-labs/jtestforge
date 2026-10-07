@@ -18,6 +18,9 @@ import java.util.Map;
  *                           relative to the config file
  * @param localRepository    where that tree's jars live; detected from Maven's settings when null
  * @param javaVersion        Java release of the target code (8, 1.8, 11...); detected when null
+ * @param sourceEncoding     character encoding of the target module's Java sources (UTF-8,
+ *                           ISO-8859-1, windows-1252...); detected from the pom chain when null,
+ *                           UTF-8 when the pom declares none
  */
 public record ProjectConfig(
         String modulePath,
@@ -30,9 +33,20 @@ public record ProjectConfig(
         Map<Tier, String> testClassSuffixByTier,
         String dependencyTreeFile,
         String localRepository,
-        String javaVersion) {
+        String javaVersion,
+        String sourceEncoding) {
 
     private static final Map<Tier, String> DEFAULT_SUFFIX_BY_TIER = defaultSuffixByTier();
+
+    /** The shape this record had before {@code sourceEncoding} existed; leaves it to be detected. */
+    public ProjectConfig(
+            String modulePath, String mavenExecutable, List<String> mavenArgs, String javaHome,
+            String testSourceRoot, String mainSourceRoot, String testClassSuffix,
+            Map<Tier, String> testClassSuffixByTier, String dependencyTreeFile, String localRepository,
+            String javaVersion) {
+        this(modulePath, mavenExecutable, mavenArgs, javaHome, testSourceRoot, mainSourceRoot, testClassSuffix,
+                testClassSuffixByTier, dependencyTreeFile, localRepository, javaVersion, null);
+    }
 
     public ProjectConfig {
         mavenExecutable = mavenExecutable == null ? "mvn" : mavenExecutable;

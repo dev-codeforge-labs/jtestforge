@@ -6,16 +6,10 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -29,17 +23,14 @@ import java.util.zip.ZipFile;
  */
 public final class JavaVersionDetector {
 
-    private static final int MAX_PARENT_DEPTH = 20;
-    private static final int MAX_INTERPOLATION_ROUNDS = 10;
     private static final int MAX_CLASS_SAMPLES = 50;
     private static final int CLASS_FILE_MAGIC = 0xCAFEBABE;
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]+)}");
 
-    private final MavenLocalRepository localRepository;
+    private final PomChain pomChain;
 
     /** @param localRepository where parent poms not found on disk are looked up; may be null */
     public JavaVersionDetector(MavenLocalRepository localRepository) {
-        this.localRepository = localRepository;
+        this.pomChain = new PomChain(localRepository);
     }
 
     /** @throws IllegalArgumentException if {@code configuredVersion} is set but is not a Java version */
@@ -81,13 +72,9 @@ public final class JavaVersionDetector {
         if (!Files.isRegularFile(pomFile)) {
             return Optional.empty();
         }
-        List<PomInfo> chain = pomChain(pomFile);
-        Map<String, String> properties = new HashMap<>();
-        Map<String, String> compiler = new HashMap<>();
-        for (int i = chain.size() - 1; i >= 0; i--) {
-            properties.putAll(chain.get(i).properties());
-            compiler.putAll(chain.get(i).compilerConfiguration());
-        }
+        List<PomInfo> chain = pomChain.read(pomFile);
+        Map<String, String> properties = PomChain.properties(chain);
+        Map<String, String> compiler = PomChain.compilerConfiguration(chain);
         List<Setting> settingsInPrecedenceOrder = List.of(
                 new Setting("maven-compiler-plugin <release>", compiler.get("release")),
                 new Setting("maven.compiler.release", properties.get("maven.compiler.release")),
@@ -100,82 +87,13 @@ public final class JavaVersionDetector {
             if (setting.rawValue() == null) {
                 continue;
             }
-            String value = interpolate(setting.rawValue(), properties);
+            String value = PomChain.interpolate(setting.rawValue(), properties);
             int release = JavaRelease.parse(value);
             if (release > 0) {
                 return Optional.of(new DetectedJavaVersion(release, "pom.xml " + setting.name() + " = " + value));
             }
         }
         return Optional.empty();
-    }
-
-    /** The module's pom first, then each ancestor that can be found. */
-    private List<PomInfo> pomChain(Path pomFile) {
-        List<PomInfo> chain = new ArrayList<>();
-        Set<Path> seen = new HashSet<>();
-        Path current = pomFile;
-        while (current != null && chain.size() < MAX_PARENT_DEPTH && seen.add(current.toAbsolutePath().normalize())) {
-            PomInfo pom;
-            try {
-                pom = PomReader.read(current);
-            } catch (RuntimeException e) {
-                break;
-            }
-            chain.add(pom);
-            current = pom.parent() == null ? null : locateParent(pom).orElse(null);
-        }
-        return chain;
-    }
-
-    private Optional<Path> locateParent(PomInfo child) {
-        PomInfo.ParentReference parent = child.parent();
-        if (!parent.relativePath().isEmpty()) {
-            Path candidate = child.directory().resolve(parent.relativePath()).normalize();
-            if (Files.isDirectory(candidate)) {
-                candidate = candidate.resolve("pom.xml");
-            }
-            if (Files.isRegularFile(candidate) && declaresArtifact(candidate, parent.artifactId())) {
-                return Optional.of(candidate);
-            }
-        }
-        if (localRepository != null && parent.groupId() != null && parent.artifactId() != null
-                && parent.version() != null) {
-            Path fromRepository = localRepository.artifact(
-                    parent.groupId(), parent.artifactId(), parent.version(), "", "pom");
-            if (Files.isRegularFile(fromRepository)) {
-                return Optional.of(fromRepository);
-            }
-        }
-        return Optional.empty();
-    }
-
-    private static boolean declaresArtifact(Path pomFile, String artifactId) {
-        try {
-            return artifactId != null && artifactId.equals(PomReader.read(pomFile).artifactId());
-        } catch (RuntimeException e) {
-            return false;
-        }
-    }
-
-    private static String interpolate(String raw, Map<String, String> properties) {
-        String value = raw;
-        for (int round = 0; round < MAX_INTERPOLATION_ROUNDS && value.contains("${"); round++) {
-            Matcher matcher = PLACEHOLDER.matcher(value);
-            StringBuilder resolved = new StringBuilder();
-            boolean changed = false;
-            while (matcher.find()) {
-                String replacement = properties.get(matcher.group(1));
-                changed |= replacement != null;
-                matcher.appendReplacement(resolved,
-                        Matcher.quoteReplacement(replacement != null ? replacement : matcher.group()));
-            }
-            matcher.appendTail(resolved);
-            value = resolved.toString();
-            if (!changed) {
-                break;
-            }
-        }
-        return value;
     }
 
     private static Optional<DetectedJavaVersion> fromClassFiles(Path classesDirectory) {

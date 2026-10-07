@@ -1,12 +1,14 @@
 package com.devmanchego.jtestforge.e2e;
 
 import com.devmanchego.jtestforge.config.PromptDelivery;
+import com.devmanchego.jtestforge.config.ProviderConfig;
+import com.devmanchego.jtestforge.config.ProviderType;
 import com.devmanchego.jtestforge.model.WorkUnit;
 import com.devmanchego.jtestforge.orchestration.DiscoveredUnit;
 import com.devmanchego.jtestforge.orchestration.GenerateResult;
 import com.devmanchego.jtestforge.orchestration.TierRestriction;
 import com.devmanchego.jtestforge.provider.AiProvider;
-import com.devmanchego.jtestforge.provider.ProcessAiProvider;
+import com.devmanchego.jtestforge.provider.AiProviderFactory;
 import com.devmanchego.jtestforge.spring.ContextKeyStabilityTracker;
 import com.devmanchego.jtestforge.util.ProcessRunner;
 
@@ -47,36 +49,45 @@ import java.util.Map;
 public final class TuningLoopRunner {
 
     /**
-     * One entry per CLI this manual loop has been run against at least once. Mirrors
+     * One entry per provider this manual loop has been run against at least once. Mirrors
      * {@code jtestforge.yaml.template}'s {@code aiProvider.providers} defaults, not a
      * separate source of truth for production - a provider only belongs here once a real
-     * pass against it has produced transcripts worth reading.
+     * pass against it has produced transcripts worth reading. Real {@link ProviderConfig}s,
+     * built by the same {@link AiProviderFactory} as the command line, so a profile cannot
+     * behave differently here than the same block would in {@code jtestforge.yaml}.
      */
-    private record ProviderProfile(
-            String command, List<String> args, PromptDelivery promptDelivery, Integer maxPromptChars) {
-    }
-
-    private static final Map<String, ProviderProfile> KNOWN_PROVIDERS = Map.of(
-            "claude", new ProviderProfile("claude",
-                    List.of("-p", "--output-format", "text"), PromptDelivery.STDIN, null),
-            "gemini", new ProviderProfile("gemini.cmd",
-                    List.of("-p", ""), PromptDelivery.STDIN, null),
-            "codex", new ProviderProfile("codex",
+    private static final Map<String, ProviderConfig> KNOWN_PROVIDERS = Map.of(
+            "claude", process("claude", List.of("-p", "--output-format", "text"), null, null),
+            "gemini", process("gemini.cmd", List.of("-p", ""), null, null),
+            "codex", process("codex",
                     List.of("exec", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never"),
-                    PromptDelivery.STDIN, null),
-            "copilot", new ProviderProfile("copilot",
-                    List.of("--allow-all-tools", "--available-tools", "-s", "--log-level", "error"),
-                    PromptDelivery.STDIN, null));
+                    null, null),
+            "copilot", process("copilot",
+                    List.of("--allow-all-tools", "--available-tools", "-s", "--log-level", "error"), null, null),
+            // Needs the derived model first: ollama create jtestforge-qwen3-coder -f tools/ollama/Modelfile
+            "ollama", process("ollama",
+                    List.of("run", "jtestforge-qwen3-coder", "--nowordwrap", "--hidethinking",
+                            "--keepalive", "30m", "--verbose"),
+                    900, 60000),
+            // Ollama's own HTTP API: no derived model needed, the options travel with each request.
+            "ollama-http", new ProviderConfig(null, null, null, 900, null, null, 60000,
+                    ProviderType.HTTP, "ollama", "http://localhost:11434", "qwen3-coder:30b",
+                    Map.of("num_ctx", 32768, "temperature", 0.7, "num_predict", 4096), "30m", null));
+
+    private static ProviderConfig process(String command, List<String> args, Integer timeoutSeconds,
+                                          Integer maxPromptChars) {
+        return new ProviderConfig(command, args, PromptDelivery.STDIN, timeoutSeconds, null, null, maxPromptChars);
+    }
 
     private TuningLoopRunner() {
     }
 
     public static void main(String[] args) throws IOException {
         String providerId = System.getProperty("provider", "claude");
-        ProviderProfile profile = KNOWN_PROVIDERS.get(providerId);
+        ProviderConfig profile = KNOWN_PROVIDERS.get(providerId);
         if (profile == null) {
             throw new IllegalArgumentException("Unknown -Dprovider=\"" + providerId + "\" - known providers: "
-                    + KNOWN_PROVIDERS.keySet() + ". Add a ProviderProfile entry for a new one.");
+                    + KNOWN_PROVIDERS.keySet() + ". Add an entry to KNOWN_PROVIDERS for a new one.");
         }
         Integer maxPromptCharsOverride = Integer.getInteger("maxPromptChars");
 
@@ -94,9 +105,7 @@ public final class TuningLoopRunner {
             System.out.println("  " + unit.workUnit().id().format());
         }
 
-        AiProvider provider = new ProcessAiProvider(
-                providerId, new ProcessRunner(), profile.command(),
-                profile.args(), profile.promptDelivery(), 2, workDir);
+        AiProvider provider = AiProviderFactory.create(providerId, profile, new ProcessRunner(), workDir);
 
         int maxPromptChars = maxPromptCharsOverride != null ? maxPromptCharsOverride
                 : profile.maxPromptChars() != null ? profile.maxPromptChars() : 60000;
@@ -105,7 +114,7 @@ public final class TuningLoopRunner {
                 + "network and can take several minutes)...");
         ContextKeyStabilityTracker tracker = new ContextKeyStabilityTracker(40);
         GenerateResult result = harness.runGenerate(provider, TierRestriction.allTiers(), tracker, 0,
-                Duration.ofSeconds(300), maxPromptChars);
+                Duration.ofSeconds(profile.timeoutSeconds()), maxPromptChars);
 
         System.out.println();
         System.out.println("=== Result ===");

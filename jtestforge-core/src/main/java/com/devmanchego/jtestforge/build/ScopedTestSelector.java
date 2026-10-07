@@ -11,8 +11,11 @@ import java.util.List;
  * which always passes an argument list to {@link ProcessBuilder} rather than a shell
  * command line. Neither Windows' {@code CreateProcess} argument parsing nor a POSIX
  * {@code exec} treats {@code #}, {@code +} or {@code ,} as special - those are shell
- * metacharacters, and no shell sits between JTestForge and Maven. This class exists to
- * get the *value* right, once, in one place, rather than to escape it.
+ * metacharacters, and the argument list is never joined into a command line for a shell.
+ * (On Windows, launching a {@code mvn.cmd} wrapper does involve {@code cmd.exe}, whose own
+ * metacharacters are {@code & | < > ^ %} and the quote: none of them can occur here, since
+ * a test class name and method names are Java identifiers.) This class exists to get the
+ * *value* right, once, in one place, rather than to escape it.
  */
 public final class ScopedTestSelector {
 

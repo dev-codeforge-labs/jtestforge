@@ -77,8 +77,9 @@ public final class ScanCommand implements Callable<Integer> {
         try {
             List<Path> classpath = resolution.compileClasspath();
             int javaRelease = resolution.javaVersion().release();
-            var typeSolver = ProductionTypeSolvers.forModule(mainSourceRoot, classpath);
-            productionClasses = new ProductionClassScanner(typeSolver, mainSourceRoot, javaRelease).scan();
+            var sourceCharset = resolution.sourceEncoding().charset();
+            var typeSolver = ProductionTypeSolvers.forModule(mainSourceRoot, classpath, sourceCharset);
+            productionClasses = new ProductionClassScanner(typeSolver, mainSourceRoot, javaRelease, sourceCharset).scan();
         } catch (RuntimeException e) {
             resolution.report(console);
             console.error("Failed to analyse " + modulePath + ": " + e.getMessage());

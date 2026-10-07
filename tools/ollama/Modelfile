@@ -1,0 +1,29 @@
+# Derived Ollama model for JTestForge - see usage.md, "Ollama (local model)".
+#
+# Build it once (no download: it reuses the base model's weights already on disk):
+#   ollama create jtestforge-qwen3-coder -f tools/ollama/Modelfile
+#
+# Why a derived model at all: `ollama run` has no flag for num_ctx, temperature or
+# num_predict, and Ollama silently drops the START of a prompt that does not fit num_ctx -
+# which is where JTestForge puts the rules, the response contract and the class under test.
+# Pinning the values in the model is the only way to set them when driving it by command.
+#
+# Change FROM to whichever model `ollama list` shows on your machine. This one is the official
+# Q4_K_M build (18 GB, `ollama pull qwen3-coder:30b`). The smaller IQ3_XXS build
+# (danielsheep/Qwen3-Coder-30B-A3B-Instruct-1M-Unsloth:UD-IQ3_XXS, 12 GB) was tried first and
+# is noticeably less reliable at following the response format.
+FROM qwen3-coder:30b
+
+# Must hold the prompt plus the answer: context.maxPromptChars (60000 chars is roughly
+# 17-20k tokens of Java) + num_predict, with headroom. 32768 covers that; the KV cache
+# for this model at 32k is on the order of a few GB on top of the weights.
+PARAMETER num_ctx 32768
+
+# The value the base model's authors recommend (with top_p 0.8, top_k 20, repeat_penalty
+# 1.05, all inherited). 0.2 was tried first and the model fell into repetition loops on the
+# web-slice units: the same 23 import lines over and over until num_predict ran out.
+PARAMETER temperature 0.7
+
+# Upper bound on the answer; a cut-off answer shows up as an unclosed ```java block,
+# which ResponseParser rejects as a contract violation.
+PARAMETER num_predict 4096

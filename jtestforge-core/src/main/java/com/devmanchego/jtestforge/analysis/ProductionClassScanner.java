@@ -65,12 +65,18 @@ public final class ProductionClassScanner {
      *                    wrongly detected release cannot fail a scan that used to pass.
      */
     public ProductionClassScanner(TypeSolver typeSolver, Path mainSourceRoot, int javaRelease) {
+        this(typeSolver, mainSourceRoot, javaRelease, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** @param charset the module's source encoding, used to decode every file scanned */
+    public ProductionClassScanner(TypeSolver typeSolver, Path mainSourceRoot, int javaRelease,
+                                  java.nio.charset.Charset charset) {
         this.mainSourceRoot = mainSourceRoot;
         ParserConfiguration.LanguageLevel level = JavaLanguageLevels.forRelease(javaRelease);
-        this.javaParser = new JavaParser(parserConfiguration(typeSolver, level));
+        this.javaParser = new JavaParser(parserConfiguration(typeSolver, level, charset));
         this.fallbackParser = level == ParserConfiguration.LanguageLevel.JAVA_21
                 ? null
-                : new JavaParser(parserConfiguration(typeSolver, ParserConfiguration.LanguageLevel.JAVA_21));
+                : new JavaParser(parserConfiguration(typeSolver, ParserConfiguration.LanguageLevel.JAVA_21, charset));
     }
 
     /**
@@ -85,8 +91,15 @@ public final class ProductionClassScanner {
 
     public static ParserConfiguration parserConfiguration(
             TypeSolver typeSolver, ParserConfiguration.LanguageLevel languageLevel) {
+        return parserConfiguration(typeSolver, languageLevel, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    public static ParserConfiguration parserConfiguration(
+            TypeSolver typeSolver, ParserConfiguration.LanguageLevel languageLevel,
+            java.nio.charset.Charset charset) {
         return new ParserConfiguration()
                 .setLanguageLevel(languageLevel)
+                .setCharacterEncoding(charset)
                 .setSymbolResolver(new JavaSymbolSolver(typeSolver));
     }
 

@@ -718,4 +718,383 @@ class ResponseParserTest {
         assertThat(result.candidates()).isEmpty();
         assertThat(result.dropped()).hasSize(1);
     }
+
+    // --- shapes seen from a local Ollama model (jtestforge-ollama-analysis.md, "Resultados de A2") ---
+
+    @Test
+    void anImportsBlockLabelledJavaIsReadAsImportsInsteadOfBeingTakenForTheTests() {
+        // Verbatim shape of the answer to PricingRules#band: the first ```java block holds
+        // only an import, the second one the tests.
+        String response = """
+                ```java
+                import static org.junit.jupiter.api.Assertions.assertThrows;
+                ```
+
+                ```java
+                @Test
+                void band_amountIsNegative_throwsIllegalArgumentException() {
+                    assertThrows(IllegalArgumentException.class, () -> subject.band(-1));
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).singleElement().satisfies(candidate -> {
+            assertThat(candidate.methodName()).isEqualTo("band_amountIsNegative_throwsIllegalArgumentException");
+            assertThat(candidate.requiredImports())
+                    .containsExactly("static org.junit.jupiter.api.Assertions.assertThrows");
+        });
+    }
+
+    @Test
+    void anUnlabelledImportsBlockClosedWithFourBackticksStillSuppliesTheImports() {
+        // Shape of the first answer to OrderController#create: no label on the imports
+        // block, and a longer closing fence than the opening one.
+        String response = """
+                ```
+                import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+                import org.springframework.http.MediaType;
+                ````
+
+                ```java
+                @Test
+                void postsAnOrder() throws Exception {
+                    mockMvc.perform(post("/api/orders").contentType(MediaType.APPLICATION_JSON));
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).singleElement().satisfies(candidate ->
+                assertThat(candidate.requiredImports()).containsExactly(
+                        "static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post",
+                        "org.springframework.http.MediaType"));
+    }
+
+    @Test
+    void aStrayBareFenceLineAheadOfTheBlocksDoesNotHideTheJavaBlock() {
+        // Shape of the repair answer to OrderController#create: an empty fence line first,
+        // which used to shift the fence pairing so that no java block was found at all.
+        String response = """
+                ```
+                ```java
+                import org.springframework.http.MediaType;
+                ```
+
+                ```java
+                @Test
+                void createsAnOrder() {
+                    assertEquals(1, 1);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).singleElement().satisfies(candidate -> {
+            assertThat(candidate.methodName()).isEqualTo("createsAnOrder");
+            assertThat(candidate.requiredImports()).containsExactly("org.springframework.http.MediaType");
+        });
+    }
+
+    @Test
+    void anAnswerEchoingThePromptsOuterFourBacktickFenceIsStillParsed() {
+        String response = """
+                ````
+                ```imports
+                java.util.Optional
+                ```
+
+                ```java
+                @Test
+                void echoesTheTemplate() {
+                    assertEquals(1, 1);
+                }
+                ```
+                ````
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).singleElement().satisfies(candidate ->
+                assertThat(candidate.requiredImports()).containsExactly("java.util.Optional"));
+    }
+
+    @Test
+    void importsRepeatedAcrossAndWithinBlocksAreKeptOnce() {
+        // The first answer to OrderController#create repeated its import list over and over.
+        String response = """
+                ```imports
+                java.util.Optional
+                java.math.BigDecimal
+                java.util.Optional
+                ```
+
+                ```java
+                import java.math.BigDecimal;
+                import java.util.Optional;
+                ```
+
+                ```java
+                @Test
+                void usesBoth() {
+                    assertEquals(1, 1);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.candidates()).singleElement().satisfies(candidate ->
+                assertThat(candidate.requiredImports()).containsExactly("java.util.Optional", "java.math.BigDecimal"));
+    }
+
+    @Test
+    void aJavaBlockHoldingOnlyImportsAndNoTestsIsFatalWithAMessageSayingSo() {
+        // Verbatim shape of the answer to OrderService#findByReference: ten tokens of
+        // imports, then the model stopped.
+        String response = """
+                ```java
+                import java.util.Optional;
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isTrue();
+        assertThat(result.violation().kind()).isEqualTo(ContractViolationKind.NOT_FENCED);
+        assertThat(result.violation().message()).containsIgnoringCase("only import");
+    }
+
+    @Test
+    void aTruncatedTestsBlockAfterAMislabelledImportsBlockIsStillReportedAsTruncated() {
+        String response = """
+                ```java
+                import java.util.Optional;
+                ```
+
+                ```java
+                @Test
+                void gotCutOff() {
+                    assertEquals(1, 1
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isTrue();
+        assertThat(result.violation().message()).containsIgnoringCase("truncat");
+    }
+
+    // --- A3b: leading imports inside the java block, and an unlabelled tests block ---
+
+    @Test
+    void importsWrittenAtTheTopOfTheJavaBlockAreLiftedOutOfItAndKept() {
+        // Shape of the repair answer to PricingRules#fee: imports and methods in one block.
+        String response = """
+                ```java
+                import org.junit.jupiter.api.Test;
+                import static org.junit.jupiter.api.Assertions.*;
+                import java.math.BigDecimal;
+
+                @Test
+                void fee_amountIsNull_throwsIllegalArgumentException() {
+                    assertThrows(IllegalArgumentException.class, () -> subject.fee(null, false));
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).singleElement().satisfies(candidate -> {
+            assertThat(candidate.methodName()).isEqualTo("fee_amountIsNull_throwsIllegalArgumentException");
+            assertThat(candidate.requiredImports()).containsExactly(
+                    "org.junit.jupiter.api.Test", "static org.junit.jupiter.api.Assertions.*", "java.math.BigDecimal");
+        });
+    }
+
+    @Test
+    void anImportAfterTheFirstMemberIsNotLiftedAndTheBlockStaysUnparseable() {
+        // Only the unbroken run at the top is lifted: an import further down still cannot
+        // be part of a class body, so the response is still refused.
+        String response = """
+                ```java
+                @Test
+                void first() {
+                    assertEquals(1, 1);
+                }
+
+                import java.util.List;
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isTrue();
+        assertThat(result.violation().kind()).isEqualTo(ContractViolationKind.UNPARSEABLE_JAVA_BLOCK);
+    }
+
+    @Test
+    void aWholeClassPrecededByImportsIsStillRejectedAsAFullCompilationUnit() {
+        // Lifting the leading imports must not turn a class wrapper into acceptable input.
+        String response = """
+                ```java
+                import org.junit.jupiter.api.Test;
+
+                class PaymentServiceTest {
+                    @Test
+                    void t() {
+                        assertEquals(1, 1);
+                    }
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isTrue();
+        assertThat(result.violation().kind()).isEqualTo(ContractViolationKind.JAVA_BLOCK_NOT_BODY_DECLARATIONS);
+    }
+
+    @Test
+    void anUnlabelledBlockHoldingImportsAndTestsIsUsedWhenThereIsNoJavaBlockAtAll() {
+        // Shape of the answer to OrderController#findByReference: one block with no
+        // language, imports first and the test methods after.
+        String response = """
+                ```
+                import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+                import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+                @Test
+                void findsNothing() throws Exception {
+                    mockMvc.perform(get("/api/orders/nonexistent")).andExpect(status().isNotFound());
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).singleElement().satisfies(candidate -> {
+            assertThat(candidate.methodName()).isEqualTo("findsNothing");
+            assertThat(candidate.requiredImports()).containsExactly(
+                    "static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get",
+                    "static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status");
+        });
+    }
+
+    @Test
+    void aLabelledJavaBlockIsAlwaysPreferredOverAnUnlabelledOne() {
+        String response = """
+                ```
+                @Test
+                void fromTheUnlabelledBlock() {
+                    assertEquals(1, 1);
+                }
+                ```
+
+                ```java
+                @Test
+                void fromTheJavaBlock() {
+                    assertEquals(1, 1);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.candidates()).extracting(TestCandidate::methodName).containsExactly("fromTheJavaBlock");
+    }
+
+    @Test
+    void anUnlabelledBlockDoesNotPaperOverATruncatedJavaBlock() {
+        String response = """
+                ```
+                @Test
+                void fromTheUnlabelledBlock() {
+                    assertEquals(1, 1);
+                }
+                ```
+
+                ```java
+                @Test
+                void gotCutOff() {
+                    assertEquals(1, 1
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isTrue();
+        assertThat(result.violation().message()).containsIgnoringCase("truncat");
+    }
+
+    @Test
+    void anUnlabelledBlockOfNonTestCodeIsStillJudgedLikeAnyOtherAndItsDeclarationsDropped() {
+        // The fallback only decides WHICH block is read. What is in it goes through the same
+        // classification: a field is dropped, not kept.
+        String response = """
+                ```
+                private String notATest = "x";
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isFalse();
+        assertThat(result.candidates()).isEmpty();
+        assertThat(result.dropped()).hasSize(1);
+    }
+
+    @Test
+    void anUnlabelledBlockThatIsNotJavaIsStillAFatalViolation() {
+        String response = """
+                ```
+                Sure! Here is how I would approach it: first stub the service, then call the endpoint.
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        assertThat(result.isFatal()).isTrue();
+        assertThat(result.violation().kind()).isEqualTo(ContractViolationKind.UNPARSEABLE_JAVA_BLOCK);
+    }
+
+    @Test
+    void aResponseWithNoFencedBlockAtAllStillSaysSo() {
+        ResponseParseResult result = parser.parse("Here you go, no code blocks though.", Set.of());
+
+        assertThat(result.isFatal()).isTrue();
+        assertThat(result.violation().message()).contains("no ```java fenced block");
+    }
+
+    @Test
+    void aSingleIdentifierLineIsNotMistakenForAnImport() {
+        // A block of one bare word has no dot and no import keyword: not an imports block,
+        // so it must not swallow a java block that follows and it must not count as imports.
+        String response = """
+                ```java
+                helper
+                ```
+
+                ```java
+                @Test
+                void realTest() {
+                    assertEquals(1, 1);
+                }
+                ```
+                """;
+
+        ResponseParseResult result = parser.parse(response, Set.of());
+
+        // The first java block ("helper") is not valid Java as a member list, which is the
+        // pre-existing behaviour for a non-imports first block - not something to rescue.
+        assertThat(result.isFatal()).isTrue();
+        assertThat(result.violation().kind()).isEqualTo(ContractViolationKind.UNPARSEABLE_JAVA_BLOCK);
+    }
 }

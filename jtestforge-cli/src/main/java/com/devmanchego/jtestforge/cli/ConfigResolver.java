@@ -69,7 +69,8 @@ final class ConfigResolver {
                         ? options.dependencyTree.toAbsolutePath().toString() : project.dependencyTreeFile(),
                 options.localRepository != null
                         ? options.localRepository.toAbsolutePath().toString() : project.localRepository(),
-                options.javaVersion != null ? options.javaVersion : project.javaVersion());
+                options.javaVersion != null ? options.javaVersion : project.javaVersion(),
+                options.sourceEncoding != null ? options.sourceEncoding : project.sourceEncoding());
         return new JTestForgeConfig(overridden, config.selection(), config.aiProvider(), config.prompts(),
                 config.spring(), config.context(), config.generate(), config.harden(), config.execution());
     }

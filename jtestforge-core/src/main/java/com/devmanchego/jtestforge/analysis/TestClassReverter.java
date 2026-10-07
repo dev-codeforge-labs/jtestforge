@@ -39,9 +39,19 @@ import java.util.regex.Pattern;
 public final class TestClassReverter {
 
     private final JavaParser javaParser = TestClassEditing.newParser();
+    private final java.nio.charset.Charset charset;
+
+    public TestClassReverter() {
+        this(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** @param charset the module's source encoding: test files are read and written back in it */
+    public TestClassReverter(java.nio.charset.Charset charset) {
+        this.charset = java.util.Objects.requireNonNull(charset, "charset");
+    }
 
     public RevertResult revert(Path testFile, Collection<String> methodNames, Collection<String> importsAdded) {
-        Optional<String> source = TestClassEditing.readSource(testFile);
+        Optional<String> source = TestClassEditing.readSource(testFile, charset);
         if (source.isEmpty()) {
             return new RevertResult(List.of(), List.of());
         }
@@ -144,7 +154,7 @@ public final class TestClassReverter {
 
     private void write(Path testFile, String content) {
         try {
-            AtomicFileWriter.write(testFile, content);
+            AtomicFileWriter.write(testFile, content, charset);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write reverted test class to " + testFile, e);
         }

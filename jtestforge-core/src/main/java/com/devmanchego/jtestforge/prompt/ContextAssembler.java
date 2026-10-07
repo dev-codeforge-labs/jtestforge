@@ -40,8 +40,15 @@ public final class ContextAssembler {
     private static final String NOTHING = "_(none)_";
 
     private final ContextConfig config;
+    private final java.nio.charset.Charset charset;
 
     public ContextAssembler(ContextConfig config) {
+        this(config, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** @param charset the module's source encoding, used to read the production and test sources shown to the model */
+    public ContextAssembler(ContextConfig config, java.nio.charset.Charset charset) {
+        this.charset = java.util.Objects.requireNonNull(charset, "charset");
         this.config = Objects.requireNonNull(config, "config");
     }
 
@@ -52,7 +59,7 @@ public final class ContextAssembler {
             return NOTHING;
         }
         try {
-            return Files.readString(productionClass.sourceFile());
+            return Files.readString(productionClass.sourceFile(), charset);
         } catch (IOException e) {
             return "_(source unavailable: " + productionClass.sourceFile() + ")_";
         }
@@ -67,7 +74,7 @@ public final class ContextAssembler {
      */
     public String targetMethodSource(ProductionClass productionClass, ProductionMethod method) {
         try {
-            List<String> lines = Files.readAllLines(productionClass.sourceFile());
+            List<String> lines = Files.readAllLines(productionClass.sourceFile(), charset);
             int from = Math.max(1, method.startLine());
             int to = Math.min(lines.size(), method.endLine());
             if (from > to) {
@@ -99,7 +106,7 @@ public final class ContextAssembler {
         }
         try {
             return PromptRenderer.capValue(
-                    Files.readString(testClass.sourceFile()), config.maxExistingTestChars());
+                    Files.readString(testClass.sourceFile(), charset), config.maxExistingTestChars());
         } catch (IOException e) {
             return "_(test class source unavailable)_";
         }
@@ -205,7 +212,7 @@ public final class ContextAssembler {
         }
         List<String> sourceLines;
         try {
-            sourceLines = Files.readAllLines(productionClass.sourceFile());
+            sourceLines = Files.readAllLines(productionClass.sourceFile(), charset);
         } catch (IOException e) {
             return lineNumbers.stream()
                     .map(n -> "- line " + n + annotation.apply(n))

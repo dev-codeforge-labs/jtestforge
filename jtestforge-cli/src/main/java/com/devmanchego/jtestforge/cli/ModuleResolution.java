@@ -2,11 +2,13 @@ package com.devmanchego.jtestforge.cli;
 
 import com.devmanchego.jtestforge.build.DependencyTreeResolver;
 import com.devmanchego.jtestforge.build.DetectedJavaVersion;
+import com.devmanchego.jtestforge.build.DetectedSourceEncoding;
 import com.devmanchego.jtestforge.build.JavaVersionDetector;
 import com.devmanchego.jtestforge.build.MavenClasspathResolver;
 import com.devmanchego.jtestforge.build.MavenLocalRepository;
 import com.devmanchego.jtestforge.build.ModuleDependencyResolver;
 import com.devmanchego.jtestforge.build.ResolvedClasspath;
+import com.devmanchego.jtestforge.build.SourceEncodingDetector;
 import com.devmanchego.jtestforge.config.ProjectConfig;
 import com.devmanchego.jtestforge.model.ModuleDependency;
 import com.devmanchego.jtestforge.util.ExecutableResolver;
@@ -43,6 +45,7 @@ final class ModuleResolution {
     private MavenLocalRepository localRepository;
     private DependencyTreeResolver treeResolver;
     private DetectedJavaVersion javaVersion;
+    private DetectedSourceEncoding sourceEncoding;
 
     ModuleResolution(ProjectConfig project, Path modulePath, Path configBaseDir) {
         this(project, modulePath, configBaseDir, null);
@@ -87,6 +90,27 @@ final class ModuleResolution {
             describeJavaLevel();
         }
         return javaVersion;
+    }
+
+    /**
+     * Character encoding of the module's sources: {@code project.sourceEncoding}, else the pom
+     * chain's own setting, else UTF-8 with a warning that it is an assumption.
+     *
+     * @throws IllegalArgumentException if {@code project.sourceEncoding} is not a supported charset
+     */
+    DetectedSourceEncoding sourceEncoding() {
+        if (sourceEncoding == null) {
+            sourceEncoding = new SourceEncodingDetector(localRepository()).detect(modulePath, project.sourceEncoding());
+            if (sourceEncoding.declared()) {
+                notes.add("Source encoding of the module: " + sourceEncoding.charset().name()
+                        + " (" + sourceEncoding.source() + ")");
+            } else {
+                warnings.add("Source encoding not declared by the module's pom chain; assuming UTF-8. If its "
+                        + "sources are saved in another encoding (ISO-8859-1, windows-1252...), set "
+                        + "project.sourceEncoding or --source-encoding - otherwise accented files are skipped.");
+            }
+        }
+        return sourceEncoding;
     }
 
     /** Prints whatever notes and warnings were established since the previous call. */

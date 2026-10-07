@@ -81,4 +81,27 @@ class AtomicFileWriterTest {
         }
     }
 
+    @Test
+    void writesInTheRequestedCharsetByteForByte(@TempDir Path dir) throws IOException {
+        Path target = dir.resolve("Legacy.java");
+
+        AtomicFileWriter.write(target, "// A\u00f1o", java.nio.charset.StandardCharsets.ISO_8859_1);
+
+        assertThat(Files.readAllBytes(target)).containsExactly('/', '/', ' ', 'A', (byte) 0xF1, 'o');
+    }
+
+    @Test
+    void aCharacterTheCharsetCannotRepresentFailsLoudlyAndLeavesTheTargetUntouched(@TempDir Path dir)
+            throws IOException {
+        // Writing a question mark in its place - String.getBytes' behaviour - would corrupt the file silently.
+        Path target = dir.resolve("Legacy.java");
+        Files.writeString(target, "original");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                        AtomicFileWriter.write(target, "5 \u20ac", java.nio.charset.StandardCharsets.ISO_8859_1))
+                .isInstanceOf(java.nio.charset.CharacterCodingException.class);
+
+        assertThat(Files.readString(target)).isEqualTo("original");
+        assertThat(leftoverTempFiles(dir)).isEmpty();
+    }
 }

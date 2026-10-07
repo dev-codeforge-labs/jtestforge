@@ -13,4 +13,13 @@ package com.devmanchego.jtestforge.orchestration;
 public interface UnitProcessor {
 
     UnitOutcome process(UnitContext context);
+
+    /**
+     * As {@link #process(UnitContext)}, announcing every edit to {@code journal} before it is
+     * written to the test file - see {@link UnitEditJournal}. The default ignores the journal,
+     * which is right for a processor that never writes to a test file.
+     */
+    default UnitOutcome process(UnitContext context, UnitEditJournal journal) {
+        return process(context);
+    }
 }

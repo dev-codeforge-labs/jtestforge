@@ -27,6 +27,7 @@ final class FakeModuleBuild implements ModuleBuild {
 
     private final Deque<CompileOutcome> compileOutcomes = new ArrayDeque<>();
     private final Deque<TestRunOutcome> scopedRunOutcomes = new ArrayDeque<>();
+    private final Deque<RuntimeException> scopedRunFailures = new ArrayDeque<>();
     private final Deque<TestRunOutcome> fullSuiteOutcomes = new ArrayDeque<>();
     private final Deque<Optional<ClassCoverage>> coverageOutcomes = new ArrayDeque<>();
 
@@ -85,6 +86,12 @@ final class FakeModuleBuild implements ModuleBuild {
         return this;
     }
 
+    /** The next scoped run throws instead of returning - an interrupted Maven, an I/O error cleaning reports... */
+    FakeModuleBuild scopedRunThrows(RuntimeException failure) {
+        scopedRunFailures.add(failure);
+        return this;
+    }
+
     FakeModuleBuild coverage(ClassCoverage coverage) {
         coverageOutcomes.add(Optional.ofNullable(coverage));
         return this;
@@ -104,6 +111,10 @@ final class FakeModuleBuild implements ModuleBuild {
     @Override
     public TestRunOutcome runScopedTests(String testClassSimpleName, List<String> methodNames) {
         calls.add("runScopedTests(" + testClassSimpleName + "#" + String.join("+", methodNames) + ")");
+        RuntimeException failure = scopedRunFailures.poll();
+        if (failure != null) {
+            throw failure;
+        }
         TestRunOutcome next = scopedRunOutcomes.poll();
         return next != null ? next : new TestRunOutcome(List.of(passing("aGeneratedTest")));
     }

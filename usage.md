@@ -66,6 +66,7 @@ These apply to every subcommand documented below (`init`, `scan`, `status`, `cle
 | `--dependency-tree <file>` | `scan`/`generate`: read dependencies from a saved `mvn dependency:tree` instead of running Maven. Overrides `project.dependencyTreeFile`. |
 | `--local-repository <dir>` | Local Maven repository holding that tree's jars. Overrides `project.localRepository`. |
 | `--java-version <n>` | Java release of the module's code (`8`, `1.8`, `11`...). Overrides `project.javaVersion`. |
+| `--source-encoding <name>` | Character encoding of the module's Java sources (`UTF-8`, `ISO-8859-1`, `windows-1252`...). Overrides `project.sourceEncoding`. |
 | `--java-home <dir>` | JDK every Maven call runs on, exported as `JAVA_HOME`. Overrides `project.javaHome`. |
 
 **Config file resolution order** (`--config` beats both):
@@ -81,7 +82,7 @@ These apply to every subcommand documented below (`init`, `scan`, `status`, `cle
 
 ### `jtestforge init`
 
-Scaffolds `jtestforge.yaml` and the eleven bundled prompt/rules template files a fresh
+Scaffolds `jtestforge.yaml` and the twelve bundled prompt/rules template files a fresh
 config points at by default (`prompts/new-test-class.md`, `prompts/rules.md`,
 `prompts/spring-web-slice.md`, and so on), writing them under the config file's own
 directory.
@@ -156,6 +157,15 @@ verified per-unit loop — render prompt, invoke, parse, static guards, merge, c
 scoped test run, value gate — keeping only what earns its place. Ends with a full-suite
 verification.
 
+An answer that breaks the response format (no ```` ```java ```` block, a whole class instead
+of test methods, only imports...) gets **one corrective re-prompt per unit**
+(`prompts/fix-contract.md`): the model is shown what was wrong and its own answer, and asked to
+resend its tests in the required shape. A second unusable answer ends the unit as
+`DISCARDED_NO_VALUE`, with both reasons in the report. It does not count against
+`generate.maxRepairAttempts`, which bounds compile and assertion repairs. A project scaffolded
+by an older `init` has no `fix-contract.md`; the bundled default is used and the run warns -
+run `init` again to get the file (it never overwrites existing ones).
+
 ```bash
 java -jar jtestforge.jar generate
 java -jar jtestforge.jar generate --tier PLAIN_UNIT     # fast run, loads no Spring context
@@ -176,6 +186,7 @@ Implemented options:
 | `--resume` | Accepted for scripting clarity; this is already the default whenever a state file exists (§8.2.3) — a stale `DONE` claim is reconciled against the filesystem, not trusted blindly. |
 | `--restart` | Discard any existing state for this module and start over with freshly discovered units. Mutually exclusive with `--resume`. |
 | `--max-units <n>` | Cap the number of units this invocation processes (overrides `execution.maxUnitsPerRun`). |
+| `--dry-run` | Do everything up to the AI call and stop (see below). Same as `execution.dryRun: true`. |
 | `--force-unlock` | Clear a stale lock (from a killed process) before acquiring it for this run. |
 
 Real preconditions this command enforces before touching the AI provider: the module has
@@ -185,10 +196,24 @@ validation (`jtestforge-specification.md` §5.1) passes against the module's *re
 detected Spring facts — not a stubbed-out default — so an `spring.enabled: true` module
 that genuinely has Spring on its classpath is never wrongly rejected.
 
+**Dry run.** `--dry-run` (or `execution.dryRun: true`) runs discovery - which builds the module
+and measures baseline coverage, touching only `target/` - then stops where the AI call would
+start. It lists the units a real run would attempt, in order and within `--tier` /
+`--max-units`, and writes the exact prompt each would send under `<stateDir>/dry-run/`, so a
+prompt template or a context limit can be checked for free. No AI provider is called, no test
+file is written, backed up or created, and `state.json` is left alone: a later real run starts
+as if the dry run had never happened. (Only the lock file and the `dry-run/` prompts are
+written.)
+
+**Backups.** With `execution.backupOriginalTests: true` (the default), an existing test file is
+copied to `<stateDir>/backups/<runId>/` - same layout as the module - just before the first
+unit that would change it, and never overwritten afterwards, so the copy is always the original.
+Units are still undone by subtracting what they added, not by restoring a copy (a copy would also
+discard what earlier units legitimately kept): the backup is a safety net for everything else. A
+copy that cannot be made is reported as a warning and the run carries on. `clean` deletes them.
+
 **Not yet implemented** (declaring any of these fails with Picocli's own "unknown option"
-rather than silently doing nothing): `--class`, `--method`, `--retry-failed`, `--dry-run`.
-`execution.dryRun` in the config is likewise bound but not yet consumed by the engine —
-setting it currently has no effect, so don't rely on it for safety.
+rather than silently doing nothing): `--class`, `--method`, `--retry-failed`.
 
 Typical output:
 
@@ -260,7 +285,7 @@ tier) and a mutant-group-to-`UnitContext` lookup from a real module, the way
 a real PIT run would leave it exactly as unverified as not building it at all, so both are
 planned together for implementation phase 20.
 
-`generate`'s own `--class`, `--method`, `--retry-failed` and `--dry-run` flags are the
+`generate`'s own `--class`, `--method` and `--retry-failed` flags are the
 same kind of gap at smaller scale — see the option table above.
 
 ---
@@ -277,6 +302,7 @@ project:
   mavenArgs: ["-o", "-B"]
   # javaHome: C:/jdk8               # JDK every Maven call runs on (exported as JAVA_HOME)
   # javaVersion: 8                  # Java level of the code; default: detected
+  # sourceEncoding: ISO-8859-1      # encoding of the sources; default: from the pom, else UTF-8
   # dependencyTreeFile: deps-tree.txt  # saved mvn dependency:tree; no Maven call for dependencies
   # localRepository: C:/m2/repo     # where that tree's jars live; default: from settings.xml
   testSourceRoot: src/test/java
@@ -310,7 +336,8 @@ spring:
 
 execution:
   stateDir: .jtestforge             # never under target/ - `mvn clean` would wipe it
-  backupOriginalTests: true
+  backupOriginalTests: true         # copies of existing test files under <stateDir>/backups/<runId>/
+  # dryRun: true                    # list units and write their prompts, call no AI; or: generate --dry-run
   consecutiveFailureAbort: 5
   maxUnitsPerRun: 0                 # 0 = unlimited
 ```
@@ -337,6 +364,18 @@ CLI** — the differences between providers are entirely in `jtestforge.yaml`'s
 in JTestForge's own code. `aiProvider.active` (or `-p/--provider` for one invocation)
 picks which entry runs.
 
+Two things about a provider's settings that are easy to get wrong:
+
+- **`env` is not secret-safe in the config file, but is in the `-v` output.** With `-v`, every command
+  is echoed with the environment it was started with - the *name* of each override always, its
+  *value* only for a few harmless variables (`JAVA_HOME`, `*_HOME`, `PATH`, `DEBUG`, `NO_COLOR`,
+  `TERM`, `LANG`, `LC_ALL`); anything else shows as `***`, so a pasted log does not leak an API key
+  or a proxy password. Still keep API keys in the real environment, never in `jtestforge.yaml`.
+- **`promptDelivery: argument` with a `.cmd`/`.bat` launcher** (e.g. `gemini.cmd`) is warned about at
+  startup: Windows runs those through `cmd.exe`, which interprets `& | < > ^ %` and quotes in the
+  prompt - which is your source code - and caps the line at about 8191 characters. Use `stdin`
+  (the default) or `file`.
+
 ### Providers verified against a real generation run
 
 Each of these has actually produced kept tests against the project's fixture module
@@ -350,9 +389,132 @@ Each of these has actually produced kept tests against the project's fixture mod
 | `codex` | `codex exec` (OpenAI Codex CLI) | Verified 2026-09 - and found a real bug the first time round: Codex wrote a bare static-member import (`org.junit.jupiter.api.Assertions.assertTrue`) without the `static` keyword the wildcard-import handling already knew to restore for `Foo.*` forms. Merged as a plain (non-static) import, that doesn't compile - `assertTrue` is a method, not a nested type. Fixed in `ResponseParser` (any bare import whose last segment starts lower-case is now treated as a static member, the same convention every type name in this codebase already follows) and covered by a regression test; a second real pass afterward completed clean. `--sandbox read-only` denies the model's own tool calls at the OS level, on top of `isolateWorkingDirectory`; `--skip-git-repo-check` is required because `ai-cwd` is deliberately not a git repository; `--color never` keeps stdout free of ANSI escapes. Codex's banner, prompt echo and token-usage stats go to stderr, not stdout. |
 
 A provider not in this table isn't necessarily broken — it just hasn't been run for real
-yet. A local Ollama model is next once it's installed, and is the most likely case to
-actually need the per-provider `maxPromptChars` override, since its context window can be
-far smaller than a hosted CLI's.
+yet. A local Ollama model is the most likely case to actually need the per-provider
+`maxPromptChars` override, since its context window can be far smaller than a hosted
+CLI's - see [Ollama](#ollama-local-model) below, which is configured but **not yet
+verified**.
+
+### Ollama (local model)
+
+Configured, **not yet verified**: the `ollama` entry in `jtestforge.yaml` drives
+`ollama run` through the same `ProcessAiProvider` as every CLI above, and has not yet
+produced kept tests in a full pass against the fixture module. Treat the first run as an
+experiment, and read the transcripts.
+
+**1. Build the derived model once.** `ollama run` has no flag for `num_ctx`,
+`temperature` or `num_predict`, so they have to live in the model:
+
+```bash
+ollama create jtestforge-qwen3-coder -f tools/ollama/Modelfile
+```
+
+`tools/ollama/Modelfile` derives from a model already on disk (edit its `FROM` line to
+whichever one `ollama list` shows) and pins `num_ctx 32768`, `temperature 0.7` and
+`num_predict 4096`. Creating it downloads nothing - it reuses the base model's weights.
+Keep the temperature at the model authors' recommended value rather than lowering it for
+"more deterministic code": with `0.2`, the Qwen3-Coder model tried here fell into
+repetition loops on the web-slice units (the same import lines over and over until
+`num_predict` ran out, 3 min 45 s per call). Then select it:
+
+```bash
+java -jar jtestforge.jar generate --provider ollama --tier PLAIN_UNIT
+```
+
+**Why `num_ctx` matters more here than for any other provider.** Ollama silently drops the
+*start* of a prompt that does not fit `num_ctx`, and JTestForge puts the rules, the
+response contract and the class under test first - so an undersized context does not fail,
+it produces plausible tests for a class the model never saw. `context.maxPromptChars`
+(60000 characters, roughly 17-20k tokens of Java) plus the answer needs about 32k tokens;
+an unconfigured model gets the server default, which is usually far less. Setting
+`OLLAMA_CONTEXT_LENGTH` in the provider's `env` block does **not** help: it reaches the
+`ollama run` client, not the server that loads the model.
+
+What to know before the first run:
+
+- **A missing model is downloaded, not reported.** If the name in `args` is not in
+  `ollama list`, `ollama run` starts pulling it inside the first unit, against that unit's
+  timeout. Check `ollama list` first.
+- **Cold start.** The first call also loads the model (about 17 s for a 12 GB model that
+  is already on disk), hence `timeoutSeconds: 900`. `--keepalive 30m` keeps it loaded
+  between units.
+- **stdout is clean; stderr is noisy.** Observed with Ollama 0.35.1 and stdin redirected:
+  stdout carries only the answer (no ANSI codes, no reasoning with `--hidethinking`), while
+  stderr carries a loading spinner (several KB of escape sequences while the model loads)
+  and, with `--verbose`, a block of timings. All of it ends up in
+  `<stateDir>/transcripts/<unit>/N.stderr.log` - harmless, but not pretty.
+- **Detecting a truncated prompt.** In that stats block, `prompt eval count` is the number
+  of prompt tokens the model actually read. If it is close to `num_ctx`, the prompt was cut
+  and the run is not trustworthy. Nothing checks this automatically yet.
+- **A cut-off answer** shows up as an unclosed ```` ```java ```` block, which
+  `ResponseParser` rejects as a contract violation; raise `num_predict` in the Modelfile if
+  that happens.
+- **Expect more rejections than from a hosted model, and read what it keeps.** A local
+  quantised model is held to the same strict response contract and the same quality guards.
+  Measured on the fixture module (single runs, not statistics): the 12 GB `IQ3_XXS` build kept
+  0-2 of 5 units depending on settings, the 18 GB `Q4_K_M` build (`ollama pull
+  qwen3-coder:30b`, what `tools/ollama/Modelfile` derives from) kept 3 of 5 - and even then
+  two of the tests kept for `PricingRules#band` were copies of another test under names
+  promising different cases. That case is now caught (the `DUPLICATE_BODY` guard rejects a test
+  whose body is identical to another's), but a test can still be useless in ways no static guard
+  sees, so with a local model review the generated tests; do not just count units marked `DONE`.
+- **Speed.** The 22 GB `Q4_K_M` model was observed running 100 % on CPU, at roughly 10-14
+  tokens/s, so a five-unit run took about 7 minutes.
+
+To run the real pass against the checked-in fixture module, see the next section with
+`-Dprovider=ollama`.
+
+#### Ollama over HTTP (`type: http`)
+
+Run end to end against the fixture module on 2026-10-07 (Ollama 0.40.0, `qwen3-coder:30b`, one
+pass, not statistics): 2 of 5 units kept, 6 correct tests for `PricingRules#band` and `#fee`; the
+other three were discarded by the quality guards or never passed. Every call finished with
+`done_reason: stop` and between 1,759 and 2,633 prompt tokens against a `num_ctx` of 32,768, in
+16-46 s each; the corrective re-prompt fired once, and no empty test skeleton was left behind.
+Treat it as working, not as verified at the level of the CLI providers above.
+
+The alternative to `ollama run`: JTestForge calls Ollama's native `POST /api/chat` itself. It needs
+no derived model - the context size and sampling travel with every request - and it can tell you
+things a CLI cannot. Uncomment the `ollama-http` entry in `jtestforge.yaml` (or write your own) and
+select it with `aiProvider.active: ollama-http` or `generate -p ollama-http`:
+
+```yaml
+aiProvider:
+  providers:
+    ollama-http:
+      type: http
+      api: ollama                      # the only protocol for now
+      baseUrl: http://localhost:11434
+      model: qwen3-coder:30b
+      options: { num_ctx: 32768, temperature: 0.7, num_predict: 4096 }
+      keepAlive: 30m
+      timeoutSeconds: 900
+      maxPromptChars: 60000
+```
+
+- **`options`** is sent exactly as written (`num_ctx`, `temperature`, `num_predict`,
+  `repeat_penalty`...). Keep `temperature` at the model authors' recommended value: `0.2` made one
+  model loop (see above).
+- **A prompt that does not fit `num_ctx` is refused, never cut.** JTestForge always sends
+  `"truncate": false`. Without it Ollama silently keeps only part of an oversized prompt and
+  answers as if nothing had happened: measured with Ollama 0.35.1, a 5,605-token prompt sent with
+  `num_ctx: 512` was cut to 258 tokens and answered normally. With it the same request is an HTTP
+  400 that names both sizes, and the unit reports it (raise `options.num_ctx` or lower
+  `maxPromptChars`). **An Ollama too old to know `truncate` ignores it and goes back to cutting
+  silently** - keep the server current.
+- **Checked before the first unit** (two read-only requests, nothing generated): the server is
+  running, it has the model, and `num_ctx` holds the prompts this run will build - a missing
+  server or model stops the run with one clear line; an unset or too-small `num_ctx` is a
+  warning, with how many characters would fit. The estimate assumes 3 characters per token,
+  pessimistic on purpose (about 4.5 was measured for Java).
+- **What each call records.** The answer's own numbers (`prompt_eval_count`, `eval_count`,
+  duration, `done_reason`) go to `<stateDir>/transcripts/<unit>/N.stderr.log`, and a
+  `done_reason: length` says outright that the answer ran out of output tokens.
+- **Retries** follow the transport/content split of every provider: a server that cannot be
+  reached, a timeout, 5xx/429 or an empty answer are retried up to `transportRetries`; a 4xx
+  (an unknown model is 404) and the context refusal are not, since repeating them cannot help.
+- **Privacy.** A `baseUrl` that is not this machine gets a warning: every prompt, including the
+  full source of the classes under test, is sent there. `headers` are sent but never written to
+  any message or log; API keys still belong in the real environment.
 
 ### Adding and verifying a new provider
 
@@ -415,6 +577,29 @@ Then set `project.dependencyTreeFile` (relative to the config file) or pass
 `~/.m2/repository`). A dependency on a sibling module resolves to its `target/classes`.
 Anything not on disk is listed as a warning and skipped — its types resolve by name
 only, and the run carries on.
+
+### Source encoding of the target code
+
+Every test class JTestForge merges into, reverts, or shows the model - and every production
+class it scans - is read and written back in the module's own character encoding. It is
+taken from the compiler plugin's `<encoding>`, then `maven.compiler.encoding`, then
+`project.build.sourceEncoding` (following parent poms, like the Java version below);
+`project.sourceEncoding` / `--source-encoding` overrides it. A pom that declares nothing is
+assumed to be UTF-8, and the run says so as a warning.
+
+Getting this right matters for legacy modules saved as `ISO-8859-1` or `windows-1252` with
+accents in comments, strings or even identifiers:
+
+- Files are read **strictly**. A test class that is not valid in the module's encoding is
+  skipped as `SKIPPED_TEST_FILE_UNREADABLE` with the reason, never overwritten.
+- A generated test containing a character the encoding cannot represent (a euro sign in
+  `ISO-8859-1`, say) is refused rather than written with a replacement character.
+- Without the right encoding, an accented *identifier* in a production class used to make the
+  whole scan fail, and an accented comment made the prompt say "source unavailable".
+
+Two scanners still decode leniently with UTF-8 - the Spring framework-gap scanner and the
+Spring Data repository scanner. They never fail and only read structure (annotations, method
+names), so the only effect is on a request path literal containing an accent.
 
 ### Java version of the target code
 

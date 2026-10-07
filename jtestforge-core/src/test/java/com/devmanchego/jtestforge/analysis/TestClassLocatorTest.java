@@ -138,6 +138,32 @@ class TestClassLocatorTest {
                 .isEqualTo(testSourceRoot.resolve("com/acme/web/OrderControllerWebTest.java"));
     }
 
+    @Test
+    void anUnparseableConventionalFileIsReportedAsUnreadableRatherThanTreatedAsMissing(@TempDir Path testSourceRoot)
+            throws IOException {
+        Path broken = writeTestClass(testSourceRoot, "com/acme/PaymentServiceTest.java", """
+                package com.acme;
+                class PaymentServiceTest { void t() { not java } }
+                """);
+        TestClassLocator locator = locator(testSourceRoot);
+
+        assertThat(locator.locate("com.acme.PaymentService", Tier.PLAIN_UNIT)).isEmpty();
+        assertThat(locator.conventionalPathFor("com.acme.PaymentService", Tier.PLAIN_UNIT)).isEqualTo(broken);
+        assertThat(locator.unreadableReason(broken)).isPresent();
+    }
+
+    @Test
+    void aMissingOrReadableFileHasNoUnreadableReason(@TempDir Path testSourceRoot) throws IOException {
+        Path readable = writeTestClass(testSourceRoot, "com/acme/PaymentServiceTest.java", """
+                package com.acme;
+                class PaymentServiceTest {}
+                """);
+        TestClassLocator locator = locator(testSourceRoot);
+
+        assertThat(locator.unreadableReason(readable)).isEmpty();
+        assertThat(locator.unreadableReason(testSourceRoot.resolve("com/acme/MissingTest.java"))).isEmpty();
+    }
+
     private TestClassLocator locator(Path testSourceRoot) {
         return new TestClassLocator(new TestClassScanner(), testSourceRoot, "Test", SUFFIX_BY_TIER);
     }

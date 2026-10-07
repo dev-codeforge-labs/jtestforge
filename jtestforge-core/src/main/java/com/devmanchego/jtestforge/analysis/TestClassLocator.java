@@ -58,6 +58,17 @@ public final class TestClassLocator {
         return findSliceClassByAnnotation(productionClassFqn, tier);
     }
 
+    /**
+     * Why the file at {@code testFile} must not be touched, if it exists but could not be read
+     * or parsed - see {@link TestFileScan.Unreadable}. Empty when there is no file (it may be
+     * created) or when it was read fine (it may be merged into).
+     */
+    public Optional<String> unreadableReason(Path testFile) {
+        return scanner.inspect(testFile) instanceof TestFileScan.Unreadable unreadable
+                ? Optional.of(unreadable.reason())
+                : Optional.empty();
+    }
+
     /** Where this tier's test class would be created if none exists. */
     public Path conventionalPathFor(String productionClassFqn, Tier tier) {
         String packagePath = packageOf(productionClassFqn).replace('.', '/');

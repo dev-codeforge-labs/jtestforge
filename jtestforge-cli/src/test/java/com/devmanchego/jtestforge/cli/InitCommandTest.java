@@ -13,12 +13,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * {@code jtestforge init} — jtestforge-implementation-plan.md phase 17: scaffolds a config
- * and the eleven bundled prompt/rules files, never overwriting anything already there.
+ * and the twelve bundled prompt/rules files, never overwriting anything already there.
  */
 class InitCommandTest {
 
     @Test
-    void aFreshDirectoryGetsAConfigAndElevenPromptFiles(@TempDir Path dir) {
+    void aFreshDirectoryGetsAConfigAndTwelvePromptFiles(@TempDir Path dir) {
         int exitCode = run(dir);
 
         assertThat(exitCode).isEqualTo(0);
@@ -32,6 +32,7 @@ class InitCommandTest {
         assertThat(prompts.resolve("kill-mutants.md")).exists();
         assertThat(prompts.resolve("fix-compilation.md")).exists();
         assertThat(prompts.resolve("fix-assertion.md")).exists();
+        assertThat(prompts.resolve("fix-contract.md")).exists();
         assertThat(prompts.resolve("spring-web-slice.md")).exists();
         assertThat(prompts.resolve("spring-data-slice.md")).exists();
         assertThat(prompts.resolve("spring-json-slice.md")).exists();
@@ -95,6 +96,14 @@ class InitCommandTest {
 
         assertThat(exitCode).isEqualTo(0);
         assertThat(readSafely(dir.resolve("jtestforge.yaml"))).contains("active: codex");
+    }
+
+    @Test
+    void ollamaIsAlsoAKnownProvider(@TempDir Path dir) {
+        int exitCode = runWithProvider(dir, "ollama");
+
+        assertThat(exitCode).isEqualTo(0);
+        assertThat(readSafely(dir.resolve("jtestforge.yaml"))).contains("active: ollama");
     }
 
     @Test

@@ -31,6 +31,13 @@ public final class UnitPromptFactory {
     private final ContextAssembler assembler;
     private final MutantBehaviourTranslator mutantTranslator = new MutantBehaviourTranslator();
 
+    /**
+     * Cap on how much of a broken answer is shown back to the model. Enough to resend a normal
+     * batch of tests; a runaway answer (a local model looping on one import line until its
+     * output limit, 27 KB in one observed run) must not crowd out the class under test.
+     */
+    static final int MAX_PREVIOUS_RESPONSE_CHARS = 6_000;
+
     public UnitPromptFactory(Map<PromptTemplateId, PromptTemplate> templates,
                              PromptRenderer renderer, ContextAssembler assembler) {
         this.templates = Map.copyOf(templates);
@@ -48,6 +55,23 @@ public final class UnitPromptFactory {
 
     public String fixAssertionPrompt(UnitContext context, List<SurefireTestResult> failures) {
         return render(PromptTemplateId.FIX_ASSERTION, context, List.of(), failures);
+    }
+
+    /**
+     * The single corrective re-prompt of jtestforge-specification.md §6.2: the previous answer
+     * broke the response contract (no {@code java} block, a whole class, imports in the wrong
+     * place...) and none of it could be read.
+     *
+     * @param violation        the parser's own explanation of what was wrong
+     * @param previousResponse the unusable answer, shown back so the model can resend its tests
+     *                         in the right shape; capped, and with {@code {{} defused so nothing in
+     *                         it can be mistaken for a placeholder when the template is rendered
+     */
+    public String fixContractPrompt(UnitContext context, String violation, String previousResponse) {
+        String shown = PromptRenderer.capValue(previousResponse == null ? "" : previousResponse,
+                MAX_PREVIOUS_RESPONSE_CHARS).replace("{{", "{ {");
+        return renderer.render(templates.get(PromptTemplateId.FIX_CONTRACT),
+                fullContext(context, List.of(), List.of(), violation, shown));
     }
 
     /**
@@ -70,11 +94,13 @@ public final class UnitPromptFactory {
 
     private String render(PromptTemplateId templateId, UnitContext context,
                           List<CompilerError> compilerErrors, List<SurefireTestResult> failures) {
-        return renderer.render(templates.get(templateId), fullContext(context, compilerErrors, failures));
+        return renderer.render(templates.get(templateId),
+                fullContext(context, compilerErrors, failures, "_(none)_", "_(none)_"));
     }
 
     private PromptContext fullContext(UnitContext context,
-                                      List<CompilerError> compilerErrors, List<SurefireTestResult> failures) {
+                                      List<CompilerError> compilerErrors, List<SurefireTestResult> failures,
+                                      String contractViolation, String previousResponse) {
         var productionClass = context.productionClass();
         var method = context.targetMethod();
 
@@ -106,6 +132,8 @@ public final class UnitPromptFactory {
                 .with(PromptPlaceholder.FRAMEWORK_SEMANTIC_GAPS, assembler.frameworkSemanticGaps(context.gaps()))
                 .with(PromptPlaceholder.RULES, templates.get(PromptTemplateId.RULES).rawText())
                 .with(PromptPlaceholder.SPRING_RULES, templates.get(PromptTemplateId.SPRING_RULES).rawText())
+                .with(PromptPlaceholder.CONTRACT_VIOLATION, contractViolation)
+                .with(PromptPlaceholder.PREVIOUS_RESPONSE, previousResponse)
                 .build();
     }
 

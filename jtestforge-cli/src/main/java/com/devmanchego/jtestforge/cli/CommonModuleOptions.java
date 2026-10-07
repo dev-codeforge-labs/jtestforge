@@ -35,12 +35,17 @@ final class CommonModuleOptions {
             + "(8, 1.8, 11, 17...). Overrides project.javaVersion. Default: detected from the pom or bytecode")
     String javaVersion;
 
+    @Option(names = "--source-encoding", description = "Character encoding of the module's Java sources "
+            + "(UTF-8, ISO-8859-1, windows-1252...). Overrides project.sourceEncoding. Default: detected from "
+            + "the pom's encoding settings, UTF-8 when it declares none")
+    String sourceEncoding;
+
     @Option(names = "--java-home", description = "JDK every Maven call runs on, exported as JAVA_HOME. "
             + "Overrides project.javaHome")
     Path javaHome;
 
     boolean overridesProject() {
         return module != null || dependencyTree != null || localRepository != null || javaVersion != null
-                || javaHome != null;
+                || sourceEncoding != null || javaHome != null;
     }
 }

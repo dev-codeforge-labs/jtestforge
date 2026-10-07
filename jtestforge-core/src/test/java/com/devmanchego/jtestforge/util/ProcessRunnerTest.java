@@ -249,4 +249,23 @@ class ProcessRunnerTest {
                         "[Console]::Out.Write([Console]::In.ReadToEnd())")
                 : List.of("cat");
     }
+
+    @Test
+    void theNameOfEveryEnvironmentOverrideIsEchoedButOnlyHarmlessValuesAreShown(@TempDir Path workingDirectory)
+            throws InterruptedException {
+        // -v output gets pasted into bug reports; a provider's env block is where API keys and
+        // proxy URLs with credentials end up.
+        List<String> echoed = new java.util.ArrayList<>();
+        ProcessRunner sinkedRunner = new ProcessRunner(java.nio.charset.Charset.defaultCharset(), echoed::add);
+
+        sinkedRunner.run(exitWithCodeCommand(0), workingDirectory,
+                Map.of("JAVA_HOME", "C:\\jdk", "GEMINI_CLI_HOME", "C:\\gemini", "ANTHROPIC_API_KEY", "sk-secret-123",
+                        "HTTPS_PROXY", "http://user:pass@proxy:8080", "java_home", "lower"),
+                null, Duration.ofSeconds(10));
+
+        String line = echoed.get(0);
+        assertThat(line).contains("JAVA_HOME=C:\\jdk").contains("GEMINI_CLI_HOME=C:\\gemini")
+                .contains("ANTHROPIC_API_KEY=***").contains("HTTPS_PROXY=***");
+        assertThat(line).doesNotContain("sk-secret-123").doesNotContain("user:pass");
+    }
 }

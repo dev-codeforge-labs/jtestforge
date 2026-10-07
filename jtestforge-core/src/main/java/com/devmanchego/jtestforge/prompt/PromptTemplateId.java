@@ -7,7 +7,7 @@ import java.util.Optional;
 import java.util.function.Function;
 
 /**
- * The eleven prompt files — jtestforge-specification.md §5's {@code prompts} block.
+ * The twelve prompt files — jtestforge-specification.md §5's {@code prompts} block.
  *
  * <p>{@link #RULES} and {@link #SPRING_RULES} are shared blocks rather than standalone
  * prompts: they are rendered into every other template through {@code {{RULES}}} /
@@ -20,6 +20,7 @@ public enum PromptTemplateId {
     KILL_MUTANTS("prompts/kill-mutants.md", PromptsConfig::killMutants),
     FIX_COMPILATION("prompts/fix-compilation.md", PromptsConfig::fixCompilation),
     FIX_ASSERTION("prompts/fix-assertion.md", PromptsConfig::fixAssertion),
+    FIX_CONTRACT("prompts/fix-contract.md", PromptsConfig::fixContract),
     WEB_SLICE_TESTS("prompts/spring-web-slice.md", PromptsConfig::webSliceTests),
     DATA_SLICE_TESTS("prompts/spring-data-slice.md", PromptsConfig::dataSliceTests),
     JSON_SLICE_TESTS("prompts/spring-json-slice.md", PromptsConfig::jsonSliceTests),
@@ -54,6 +55,18 @@ public enum PromptTemplateId {
             case CONTEXT_SLICE -> Optional.of(CONTEXT_TESTS);
             case PLAIN_UNIT -> Optional.empty();
         };
+    }
+
+    /**
+     * Whether a configured file that does not exist falls back to the bundled default instead
+     * of stopping startup. True only for a template added after {@code jtestforge init} may
+     * already have scaffolded a project: that project's config points at a default path it
+     * never received a file for, and refusing to start over it would break every existing
+     * setup on upgrade. Every other template keeps the strict behaviour - a missing file there
+     * is a typo worth stopping for.
+     */
+    public boolean fallsBackToBundledWhenMissing() {
+        return this == FIX_CONTRACT;
     }
 
     /** Whether this file is a shared block rendered into other templates. */

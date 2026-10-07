@@ -28,6 +28,7 @@ import com.devmanchego.jtestforge.provider.TranscriptWriter;
 import com.devmanchego.jtestforge.spring.ContextKeyDecision;
 import com.devmanchego.jtestforge.spring.SpringTestClassFactory;
 
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -66,7 +67,8 @@ public final class DefaultUnitProcessor implements UnitProcessor {
     private final SpringGenerationSupport springSupport;
     private final java.util.function.Consumer<String> progress;
 
-    private final TestClassScanner testClassScanner = new TestClassScanner();
+    private final TestClassScanner testClassScanner;
+    private final java.nio.charset.Charset sourceCharset;
 
     public DefaultUnitProcessor(AiProvider aiProvider, TranscriptWriter transcriptWriter,
                          UnitPromptFactory promptFactory, ResponseParser responseParser,
@@ -91,7 +93,26 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                          ModuleBuild moduleBuild, UnitAcceptanceGate acceptanceGate,
                          GenerateConfig generateConfig, Duration providerTimeout,
                          SpringGenerationSupport springSupport, java.util.function.Consumer<String> progress) {
+        this(aiProvider, transcriptWriter, promptFactory, responseParser, guards, merger, reverter,
+                moduleBuild, acceptanceGate, generateConfig, providerTimeout, springSupport, progress,
+                java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * @param sourceCharset the target module's source encoding. The merger and reverter passed in
+     *                      must use the same one; it is also what a brand-new test class skeleton
+     *                      is written in and what this processor's own test-file scans decode with.
+     */
+    public DefaultUnitProcessor(AiProvider aiProvider, TranscriptWriter transcriptWriter,
+                         UnitPromptFactory promptFactory, ResponseParser responseParser,
+                         StaticQualityGuards guards, TestClassMerger merger, TestClassReverter reverter,
+                         ModuleBuild moduleBuild, UnitAcceptanceGate acceptanceGate,
+                         GenerateConfig generateConfig, Duration providerTimeout,
+                         SpringGenerationSupport springSupport, java.util.function.Consumer<String> progress,
+                         java.nio.charset.Charset sourceCharset) {
         this.progress = progress;
+        this.sourceCharset = Objects.requireNonNull(sourceCharset, "sourceCharset");
+        this.testClassScanner = new TestClassScanner(sourceCharset);
         this.aiProvider = Objects.requireNonNull(aiProvider, "aiProvider");
         this.transcriptWriter = Objects.requireNonNull(transcriptWriter, "transcriptWriter");
         this.promptFactory = Objects.requireNonNull(promptFactory, "promptFactory");
@@ -106,15 +127,107 @@ public final class DefaultUnitProcessor implements UnitProcessor {
         this.springSupport = Objects.requireNonNull(springSupport, "springSupport");
     }
 
+    /**
+     * What the unit currently being processed has left in the test file - see {@link UnitEdits}.
+     * A field rather than a parameter threaded through every private method, because only
+     * {@link #process} creates it and only the few places that write to the file update it.
+     * Both engines drive a processor one unit at a time, which is what makes this safe; the
+     * class was never meant to run two units concurrently (they would share one test file).
+     */
+    private UnitEdits activeEdits = new UnitEdits();
+
+    /** Where the unit in progress announces its edits before writing them - see {@link UnitEditJournal}. */
+    private UnitEditJournal journal = UnitEditJournal.NONE;
+
     @Override
     public UnitOutcome process(UnitContext originalContext) {
+        return process(originalContext, UnitEditJournal.NONE);
+    }
+
+    @Override
+    public UnitOutcome process(UnitContext originalContext, UnitEditJournal unitJournal) {
+        UnitEdits edits = new UnitEdits();
+        activeEdits = edits;
+        journal = Objects.requireNonNull(unitJournal, "unitJournal");
+        try {
+            UnitOutcome outcome = processUnit(originalContext);
+            if (!outcome.succeeded()) {
+                discardSkeletonThisUnitCreated(originalContext.testFile(), edits);
+            }
+            return outcome;
+        } catch (RuntimeException unexpected) {
+            // Anything this class did not anticipate - a build runner interrupted, an I/O
+            // error while cleaning Surefire reports - must not leave merged tests behind. The
+            // engine records the unit as failed, and "nothing survives a failure" has to hold
+            // for this exit as it does for every deliberate one.
+            rollBack(originalContext.testFile(), edits, unexpected);
+            throw unexpected;
+        } finally {
+            activeEdits = new UnitEdits();
+            journal = UnitEditJournal.NONE;
+        }
+    }
+
+    /**
+     * Reverts whatever batch is still merged and discards a skeleton this unit created. A
+     * failure of the rollback itself is attached to {@code cause} rather than replacing it:
+     * the original exception is the one that explains what went wrong.
+     */
+    private void rollBack(Path testFile, UnitEdits edits, RuntimeException cause) {
+        try {
+            if (edits.current != null) {
+                reverter.revert(testFile, edits.current.addedTestNames(), edits.current.addedImports());
+                edits.current = null;
+                journal.record(List.of(), List.of());
+            }
+            discardSkeletonThisUnitCreated(testFile, edits);
+        } catch (RuntimeException rollbackFailure) {
+            cause.addSuppressed(rollbackFailure);
+        }
+    }
+
+    /**
+     * A unit that created the test class and ended without keeping a test leaves an empty
+     * skeleton behind (found in a real run: an {@code OrderServiceTest} with no tests and an
+     * unused import, left in the developer's source tree). It is deleted - but only when it is
+     * still exactly that: a class where a mock bean was synthesised is a structural decision
+     * that survives by design (see the class comment), and a file that somehow holds test
+     * methods or cannot be read is not this unit's to delete.
+     */
+    private void discardSkeletonThisUnitCreated(Path testFile, UnitEdits edits) {
+        if (!edits.createdTestFile || edits.synthesisedMockBeans) {
+            return;
+        }
+        if (testClassScanner.inspect(testFile) instanceof com.devmanchego.jtestforge.analysis.TestFileScan.Parsed parsed
+                && parsed.info().testMethodNames().isEmpty()) {
+            try {
+                java.nio.file.Files.deleteIfExists(testFile);
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException("Failed to remove the empty test class skeleton " + testFile, e);
+            }
+        }
+    }
+
+    private UnitOutcome processUnit(UnitContext originalContext) {
         List<String> discarded = new ArrayList<>();
+        // Last line of defence behind WorkUnitDiscovery's SKIPPED_TEST_FILE_UNREADABLE: no
+        // test-class info but a file with content means the file could not be read or parsed,
+        // not that it is missing - and writing the skeleton would delete every test in it. A
+        // file can also turn unreadable mid-run, after discovery looked at it.
+        if (!originalContext.testClassExists()
+                && testClassScanner.inspect(originalContext.testFile())
+                        instanceof com.devmanchego.jtestforge.analysis.TestFileScan.Unreadable unreadable) {
+            return UnitOutcome.failed(UnitStatus.SKIPPED_TEST_FILE_UNREADABLE,
+                    "the existing test file " + originalContext.testFile().getFileName()
+                            + " was left untouched because " + unreadable.reason(), discarded);
+        }
+        activeEdits.lastAttemptNumber = transcriptEpoch(originalContext);
         UnitContext context = ensureTestFileExists(originalContext);
 
         MergedCandidates merged;
         try {
             AttemptOutcome firstAttempt = generateAndMergeWithEscalation(
-                    context, promptFactory.generationPrompt(context), transcriptEpoch(context) + 1, discarded);
+                    context, promptFactory.generationPrompt(context), discarded);
             if (firstAttempt instanceof EscalationFailed failed) {
                 return UnitOutcome.failed(UnitStatus.ESCALATION_REQUIRED, failed.reason(), discarded);
             }
@@ -173,11 +286,12 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                 : new SpringTestClassFactory(context.springFacts(), springSupport.mockBeanSetResolver())
                         .renderSkeleton(context.productionClass(), context.unit().tier(), context.testClassSimpleName());
         try {
-            com.devmanchego.jtestforge.util.AtomicFileWriter.write(context.testFile(), skeleton);
+            com.devmanchego.jtestforge.util.AtomicFileWriter.write(context.testFile(), skeleton, sourceCharset);
         } catch (java.io.IOException e) {
             throw new java.io.UncheckedIOException(
                     "Failed to write new test class skeleton to " + context.testFile(), e);
         }
+        activeEdits.createdTestFile = true;
         return context.withTestClassInfo(rescan(context.testFile()));
     }
 
@@ -206,15 +320,23 @@ public final class DefaultUnitProcessor implements UnitProcessor {
     // --- steps 3 to 6, plus the Spring context-key guard (§7.6) -----------------------
 
     private AttemptOutcome generateAndMerge(
-            UnitContext context, String prompt, int attempt, List<String> discarded)
+            UnitContext context, String prompt, List<String> discarded)
             throws ProviderException {
 
-        String rawResponse = transcriptWriter.invokeAndRecord(
-                aiProvider, prompt, providerTimeout, context.unit().id().format(), attempt).content();
-
-        ResponseParseResult parsed = responseParser.parse(
-                rawResponse, context.testClassInfo() == null
-                        ? Set.of() : context.testClassInfo().testMethodNames());
+        String rawResponse = invoke(context, prompt);
+        ResponseParseResult parsed = parse(rawResponse, context);
+        if (parsed.isFatal() && !activeEdits.contractCorrectionUsed) {
+            // jtestforge-specification.md §6.2: one re-prompt with a corrective message, then
+            // the unit is failed. Until this existed, a single misplaced fence ended the unit -
+            // which with a local model was 4 units in 5 (jtestforge-ollama-analysis.md, A2).
+            activeEdits.contractCorrectionUsed = true;
+            discarded.add("response contract violation, asked the model to correct it: "
+                    + parsed.violation().message());
+            reportProgress("response: unusable format - asking for a corrected answer");
+            rawResponse = invoke(context,
+                    promptFactory.fixContractPrompt(context, parsed.violation().message(), rawResponse));
+            parsed = parse(rawResponse, context);
+        }
         parsed.dropped().forEach(drop -> discarded.add(drop.description() + ": " + drop.reason()));
         if (parsed.isFatal()) {
             discarded.add("response contract violation: " + parsed.violation().message());
@@ -237,12 +359,27 @@ public final class DefaultUnitProcessor implements UnitProcessor {
             }
         }
 
-        MergeResult mergeResult = merger.merge(context.testFile(), accepted);
+        // At most one batch is ever merged at a time (every repair reverts before regenerating),
+        // so what is about to be written IS the unit's whole set of edits.
+        MergeResult mergeResult = merger.merge(context.testFile(), accepted,
+                planned -> journal.record(planned.addedTestNames(), planned.addedImports()));
         if (mergeResult.isRejected()) {
             discarded.add("merge refused: " + mergeResult.rejectionReason());
             return new NoCandidates();
         }
-        return new MergedCandidates(accepted, mergeResult.addedTestNames(), mergeResult.addedImports());
+        MergedCandidates merged = new MergedCandidates(accepted, mergeResult.addedTestNames(), mergeResult.addedImports());
+        activeEdits.current = merged;
+        return merged;
+    }
+
+    private String invoke(UnitContext context, String prompt) throws ProviderException {
+        return transcriptWriter.invokeAndRecord(aiProvider, prompt, providerTimeout,
+                context.unit().id().format(), activeEdits.nextAttemptNumber()).content();
+    }
+
+    private ResponseParseResult parse(String rawResponse, UnitContext context) {
+        return responseParser.parse(rawResponse,
+                context.testClassInfo() == null ? Set.of() : context.testClassInfo().testMethodNames());
     }
 
     private List<TestCandidate> applyGuards(
@@ -258,6 +395,16 @@ public final class DefaultUnitProcessor implements UnitProcessor {
             } else {
                 rejections.forEach(rejection -> discarded.add(rejection.toString()));
             }
+        }
+        // Batch-level: needs the whole accepted list, so it cannot be part of the per-candidate pass.
+        List<GuardRejection> duplicates = guards.duplicateBodies(accepted, guardContext);
+        if (!duplicates.isEmpty()) {
+            Set<String> duplicateNames = new LinkedHashSet<>();
+            duplicates.forEach(rejection -> {
+                duplicateNames.add(rejection.methodName());
+                discarded.add(rejection.toString());
+            });
+            accepted.removeIf(candidate -> duplicateNames.contains(candidate.methodName()));
         }
         return accepted;
     }
@@ -325,8 +472,8 @@ public final class DefaultUnitProcessor implements UnitProcessor {
      * as one on the first attempt.
      */
     private AttemptOutcome generateAndMergeWithEscalation(
-            UnitContext context, String prompt, int attempt, List<String> discarded) throws ProviderException {
-        AttemptOutcome result = generateAndMerge(context, prompt, attempt, discarded);
+            UnitContext context, String prompt, List<String> discarded) throws ProviderException {
+        AttemptOutcome result = generateAndMerge(context, prompt, discarded);
         if (!(result instanceof Escalation escalation)) {
             return result;
         }
@@ -339,10 +486,11 @@ public final class DefaultUnitProcessor implements UnitProcessor {
         }
         springSupport.mockBeanSynthesizer().synthesize(
                 context.testFile(), escalation.missingMockBeans(), context.springFacts().mockBeanAnnotationFqn());
+        activeEdits.synthesisedMockBeans = true;
         UnitContext refreshed = context.withTestClassInfo(rescan(context.testFile()));
 
         AttemptOutcome retry = generateAndMerge(
-                refreshed, promptFactory.generationPrompt(refreshed), attempt + 1, discarded);
+                refreshed, promptFactory.generationPrompt(refreshed), discarded);
         if (retry instanceof Escalation) {
             return new EscalationFailed(
                     "even after synthesising " + mockBeanFieldNames(escalation.missingMockBeans())
@@ -360,6 +508,17 @@ public final class DefaultUnitProcessor implements UnitProcessor {
 
     private AttemptOutcome repairUntilCompiling(
             UnitContext context, MergedCandidates initial, List<String> discarded) throws ProviderException {
+        return repairUntilCompiling(context, initial, discarded, "");
+    }
+
+    /**
+     * @param logPrefix prefix of the build-log label, so a compile-repair round that runs
+     *                  <em>after an assertion repair</em> does not overwrite the build log of
+     *                  the first batch's own rounds (both would be {@code compile-repair-N})
+     */
+    private AttemptOutcome repairUntilCompiling(
+            UnitContext context, MergedCandidates initial, List<String> discarded,
+            String logPrefix) throws ProviderException {
         MergedCandidates current = initial;
 
         for (int repair = 0; repair <= generateConfig.maxRepairAttempts(); repair++) {
@@ -370,14 +529,14 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                 return current;
             }
             String unitId = context.unit().id().format();
-            transcriptWriter.recordBuildFailure(unitId, "compile-repair-" + repair, outcome.rawLog());
+            transcriptWriter.recordBuildFailure(unitId, logPrefix + "compile-repair-" + repair, outcome.rawLog());
             if (repair == generateConfig.maxRepairAttempts()) {
                 break;
             }
             revert(context, current);
             AttemptOutcome repaired = generateAndMergeWithEscalation(context,
                     promptFactory.fixCompilationPrompt(context, errorsOrRawLogFallback(outcome)),
-                    transcriptEpoch(context) + repair + 2, discarded);
+                    discarded);
             if (repaired instanceof EscalationFailed) {
                 return repaired;
             }
@@ -442,7 +601,7 @@ public final class DefaultUnitProcessor implements UnitProcessor {
             }
             revert(context, current);
             AttemptOutcome repaired = generateAndMergeWithEscalation(context,
-                    promptFactory.fixAssertionPrompt(context, outcome.failures()), transcriptEpoch(context) + repair + 2, discarded);
+                    promptFactory.fixAssertionPrompt(context, outcome.failures()), discarded);
             if (repaired instanceof EscalationFailed) {
                 return repaired;
             }
@@ -450,15 +609,21 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                 return new NoCandidates();
             }
             current = repairedMerged;
-            // A repaired batch has to compile again before it can be re-run: the model
-            // may have introduced a fresh compilation error while fixing the assertion.
-            CompileOutcome recompiled = moduleBuild.compileTests();
-            if (!recompiled.compiled()) {
-                transcriptWriter.recordBuildFailure(
-                        context.unit().id().format(), "assertion-repair-" + repair + "-compile", recompiled.rawLog());
-                revert(context, current);
+            // A repaired batch has to compile again before it can be re-run: the model may
+            // have introduced a fresh compilation error while fixing the assertion - found
+            // against a local model that forgot the imports of a matcher it had just started
+            // using. That deserves the same compile-repair rounds as the first batch got,
+            // not an immediate end to the unit over one missing import. Still bounded:
+            // maxRepairAttempts compile repairs per assertion repair.
+            AttemptOutcome recompiled = repairUntilCompiling(context, current, discarded,
+                    "assertion-repair-" + repair + "-");
+            if (recompiled instanceof EscalationFailed) {
+                return recompiled;
+            }
+            if (!(recompiled instanceof MergedCandidates recompiledMerged)) {
                 return new NoCandidates();
             }
+            current = recompiledMerged;
         }
         revert(context, current);
         return new NoCandidates();
@@ -501,6 +666,12 @@ public final class DefaultUnitProcessor implements UnitProcessor {
 
     private void revert(UnitContext context, MergedCandidates merged) {
         reverter.revert(context.testFile(), merged.addedTestNames(), merged.addedImports());
+        if (activeEdits.current == merged) {
+            activeEdits.current = null;
+        }
+        // After the file, not before: a kill in between leaves the journal naming methods that
+        // are already gone, and reverting them again is a no-op.
+        journal.record(List.of(), List.of());
     }
 
     /** One short, content-free progress line - see the {@code progress} constructor parameter. */
@@ -550,6 +721,39 @@ public final class DefaultUnitProcessor implements UnitProcessor {
     // --- outcome types ------------------------------------------------------------------
 
     /**
+     * What the unit in progress has written to the test file and not yet undone: the batch
+     * currently merged (null once reverted, or before the first merge), whether this unit
+     * created the file, and whether a mock bean was synthesised onto it. Exists so that every
+     * way out of {@link #process} - including an exception nobody anticipated - can put the
+     * file back, instead of each exit having to remember what to undo.
+     */
+    private static final class UnitEdits {
+        MergedCandidates current;
+        boolean createdTestFile;
+        boolean synthesisedMockBeans;
+
+        /**
+         * Whether this unit has already spent its one corrective re-prompt for a broken response
+         * contract. Once per unit, not per answer: it bounds the extra cost at a single call, and a
+         * model that cannot follow the format twice is not going to on a third try.
+         */
+        boolean contractCorrectionUsed;
+
+        /** Attempt number of the last AI call this unit made; see {@link #nextAttemptNumber()}. */
+        int lastAttemptNumber;
+
+        /**
+         * The number of the next AI call: 1, 2, 3... in the order they happen (offset by the
+         * unit's earlier attempts, see {@code transcriptEpoch}). One counter, consumed at the
+         * single place that calls the provider, so no two calls of a unit can share a number -
+         * which they used to, so a repair's transcript overwrote another's.
+         */
+        int nextAttemptNumber() {
+            return ++lastAttemptNumber;
+        }
+    }
+
+    /**
      * What one generation attempt produced, before compile/run/value-gate is applied.
      *
      * <p>Not {@code sealed}: {@link MergedCandidates} is a public top-level type (an
@@ -560,7 +764,6 @@ public final class DefaultUnitProcessor implements UnitProcessor {
     interface AttemptOutcome {
     }
 
-    /** No candidate survived response parsing, the static guards, or the merge. */
     /**
      * The scoped run failed without producing any Surefire result, so the tests never ran
      * and no assertion can be blamed - distinct from "they ran and failed", which is what
@@ -569,6 +772,7 @@ public final class DefaultUnitProcessor implements UnitProcessor {
     private record TestsNeverRan(String reason) implements AttemptOutcome {
     }
 
+    /** No candidate survived response parsing, the static guards, or the merge. */
     private record NoCandidates() implements AttemptOutcome {
     }
 

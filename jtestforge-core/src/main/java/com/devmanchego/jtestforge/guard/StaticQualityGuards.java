@@ -82,14 +82,22 @@ public final class StaticQualityGuards {
 
     private final GenerateConfig generateConfig;
     private final SpringConfig springConfig;
+    private final java.nio.charset.Charset sourceCharset;
     private final JavaParser javaParser = new JavaParser(new ParserConfiguration()
             .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21));
     private final AssertionEvidenceScanner evidenceScanner = new AssertionEvidenceScanner();
     private final GapSuppressionDetector gapMatcher = new GapSuppressionDetector();
 
     public StaticQualityGuards(GenerateConfig generateConfig, SpringConfig springConfig) {
+        this(generateConfig, springConfig, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** @param sourceCharset the module's source encoding, used to read the existing test class for duplicate detection */
+    public StaticQualityGuards(GenerateConfig generateConfig, SpringConfig springConfig,
+                               java.nio.charset.Charset sourceCharset) {
         this.generateConfig = generateConfig;
         this.springConfig = springConfig;
+        this.sourceCharset = java.util.Objects.requireNonNull(sourceCharset, "sourceCharset");
     }
 
     public List<GuardRejection> evaluate(TestCandidate candidate, GuardContext context) {
@@ -117,6 +125,73 @@ public final class StaticQualityGuards {
             semanticGapShape(method, name, context).ifPresent(rejections::add);
         }
         return List.copyOf(rejections);
+    }
+
+    // --- guard 12 --------------------------------------------------------------------
+
+    /**
+     * Batch-level companion to {@link #evaluate}: rejects a candidate whose body is the same as
+     * an earlier one in {@code accepted}, or as a method the target test class already has.
+     * Found against a local model that, asked for tests of {@code band(int)}, produced three
+     * tests of which two were copies of the first one under names promising different cases
+     * (the name said "exactly at the threshold", the body called {@code band(-1)}). They passed,
+     * and the coverage gate judges the batch as a whole, so one useful test kept all three.
+     *
+     * <p>Two methods are the same when they print identically once their name and comments are
+     * stripped, which also ignores formatting. That is deliberately the strictest notion of
+     * "duplicate": a single changed literal makes two tests different, so a parameter sweep
+     * written as separate methods is never touched - consistent with this class failing
+     * towards acceptance. It needs no JaCoCo run, so it works with
+     * {@code generate.requireCoverageGain} off.
+     *
+     * @param accepted the candidates that passed {@link #evaluate}, in the order they were written
+     * @return one rejection per duplicate; the first occurrence is never rejected
+     */
+    public List<GuardRejection> duplicateBodies(List<TestCandidate> accepted, GuardContext context) {
+        java.util.Map<String, String> seenBodies = new java.util.HashMap<>();
+        existingMethodBodies(context).forEach((body, methodName) -> seenBodies.put(body, methodName));
+        List<GuardRejection> rejections = new ArrayList<>();
+        for (TestCandidate candidate : accepted) {
+            Optional<MethodDeclaration> parsed = parse(candidate);
+            if (parsed.isEmpty()) {
+                continue;
+            }
+            String body = withoutNameAndComments(parsed.get());
+            String firstSeenAs = seenBodies.putIfAbsent(body, candidate.methodName());
+            if (firstSeenAs != null) {
+                rejections.add(new GuardRejection(GuardId.DUPLICATE_BODY, candidate.methodName(),
+                        "its body is identical to '" + firstSeenAs + "' - only the name differs, so it "
+                                + "tests nothing that test does not already"));
+            }
+        }
+        return List.copyOf(rejections);
+    }
+
+    /** Bodies of the methods the target class already has, mapped to their name; empty when unreadable. */
+    private java.util.Map<String, String> existingMethodBodies(GuardContext context) {
+        java.util.Map<String, String> bodies = new java.util.LinkedHashMap<>();
+        if (context.testClass() == null || !java.nio.file.Files.isRegularFile(context.testClass().sourceFile())) {
+            return bodies;
+        }
+        try {
+            javaParser.parse(java.nio.file.Files.readString(context.testClass().sourceFile(), sourceCharset))
+                    .getResult().ifPresent(unit ->
+                    unit.findAll(MethodDeclaration.class).forEach(method ->
+                            bodies.putIfAbsent(withoutNameAndComments(method), method.getNameAsString())));
+        } catch (java.io.IOException | RuntimeException e) {
+            // Best effort: not being able to read the class only means one fewer duplicate is caught.
+        }
+        return bodies;
+    }
+
+    private String withoutNameAndComments(MethodDeclaration method) {
+        MethodDeclaration copy = method.clone();
+        copy.setName("duplicateBodyProbe");
+        copy.getAllContainedComments().forEach(comment -> comment.remove());
+        copy.removeComment();
+        // The printer reuses the line separator it detected in each node's own source, so a CRLF
+        // file and an LF candidate would otherwise never compare equal.
+        return copy.toString().replace("\r\n", "\n").replace('\r', '\n');
     }
 
     // --- guard 4 ---------------------------------------------------------------------

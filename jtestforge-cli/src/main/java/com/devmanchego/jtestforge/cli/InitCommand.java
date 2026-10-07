@@ -20,7 +20,7 @@ import java.util.concurrent.Callable;
 
 /**
  * {@code jtestforge init} — jtestforge-specification.md §14: scaffolds
- * {@code jtestforge.yaml} and the eleven bundled prompt/rules files a fresh config points
+ * {@code jtestforge.yaml} and the twelve bundled prompt/rules files a fresh config points
  * at by default.
  *
  * <p>Never overwrites a file that already exists, config or template alike. A second
@@ -36,7 +36,7 @@ public final class InitCommand implements Callable<Integer> {
 
     private static final String BUNDLED_CONFIG_TEMPLATE = "jtestforge.yaml.template";
     /** Provider blocks the bundled template actually defines under {@code aiProvider.providers}. */
-    private static final List<String> KNOWN_PROVIDERS = List.of("claude", "gemini", "copilot", "codex");
+    private static final List<String> KNOWN_PROVIDERS = List.of("claude", "gemini", "copilot", "codex", "ollama");
     private static final String DEFAULT_ACTIVE_PROVIDER_LINE = "  active: claude";
 
     @Mixin

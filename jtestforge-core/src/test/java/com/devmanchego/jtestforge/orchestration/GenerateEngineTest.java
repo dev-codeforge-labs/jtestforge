@@ -49,6 +49,111 @@ class GenerateEngineTest {
     }
 
     @Test
+    void aUnitsEditsReachTheStateFileWhileItIsStillRunningSoAKillMidUnitLeavesThemToRevert(
+            @TempDir Path stateDir) {
+        // Phase 3: what used to be on disk at this instant was an IN_PROGRESS unit with empty
+        // addedTests - and so nothing for the shutdown hook or resume to revert.
+        StateStore store = store(stateDir);
+        List<WorkUnit> onDiskMidUnit = new ArrayList<>();
+        UnitProcessor processor = new UnitProcessor() {
+            @Override
+            public UnitOutcome process(UnitContext context) {
+                throw new AssertionError("the engine must call the journal-aware process()");
+            }
+
+            @Override
+            public UnitOutcome process(UnitContext context, UnitEditJournal journal) {
+                journal.record(List.of("halfMerged"), List.of("java.time.Clock"));
+                onDiskMidUnit.add(store.load().orElseThrow().units().get(0));
+                return UnitOutcome.failed(UnitStatus.FAILED_COMPILE, "never compiled", List.of());
+            }
+        };
+
+        engine(processor, new FakeModuleBuild().fullSuiteGreen(2), store).run(stateWithUnits(1), contextLookup());
+
+        assertThat(onDiskMidUnit).singleElement().satisfies(unit -> {
+            assertThat(unit.status()).isEqualTo(UnitStatus.IN_PROGRESS);
+            assertThat(unit.addedTests()).containsExactly("halfMerged");
+            assertThat(unit.addedImports()).containsExactly("java.time.Clock");
+        });
+        // The unit's own outcome is the last word: a failed unit has reverted everything.
+        WorkUnit finalUnit = store.load().orElseThrow().units().get(0);
+        assertThat(finalUnit.status()).isEqualTo(UnitStatus.FAILED_COMPILE);
+        assertThat(finalUnit.addedTests()).isEmpty();
+    }
+
+    // --- phase 5a: execution.backupOriginalTests -------------------------------------------------
+
+    @Test
+    void anExistingTestFileIsBackedUpBeforeTheFirstUnitTouchesItAndNeverAgainAfterwards(
+            @TempDir Path stateDir, @TempDir Path module) throws java.io.IOException {
+        Path testFile = module.resolve("src/test/java/com/acme/PaymentServiceTest.java");
+        java.nio.file.Files.createDirectories(testFile.getParent());
+        java.nio.file.Files.writeString(testFile, "original");
+        Path copy = stateDir.resolve("backups/run-1/src/test/java/com/acme/PaymentServiceTest.java");
+        // two units, one test class: each "generates" by changing the file
+        StubUnitProcessor processor = new StubUnitProcessor()
+                .thenKeeps("firstTest", () -> append(testFile, " + first"))
+                .thenKeeps("secondTest", () -> append(testFile, " + second"));
+
+        engineWithBackup(processor, new FakeModuleBuild().fullSuiteGreen(2), store(stateDir),
+                new TestFileBackup(stateDir.resolve("backups/run-1"), module))
+                .run(stateWithUnits(2), contextLookup());
+
+        assertThat(java.nio.file.Files.readString(copy)).isEqualTo("original");
+        assertThat(java.nio.file.Files.readString(testFile)).isEqualTo("original + first + second");
+    }
+
+    @Test
+    void aBackupThatCannotBeMadeDoesNotStopTheRun(@TempDir Path stateDir, @TempDir Path module)
+            throws java.io.IOException {
+        Path testFile = module.resolve("src/test/java/com/acme/PaymentServiceTest.java");
+        java.nio.file.Files.createDirectories(testFile.getParent());
+        java.nio.file.Files.writeString(testFile, "original");
+        Path notADirectory = stateDir.resolve("backups");
+        java.nio.file.Files.writeString(notADirectory, "i am a file, so nothing can be created under me");
+        StubUnitProcessor processor = new StubUnitProcessor().thenKeeps("newTest");
+        List<String> progress = new ArrayList<>();
+
+        GenerateResult result = new GenerateEngine(processor, new FakeModuleBuild().fullSuiteGreen(2),
+                store(stateDir), new ExecutionConfig(null, null, null, null, null),
+                new ContextKeyStabilityTracker(Integer.MAX_VALUE), progress::add,
+                new TestFileBackup(notADirectory.resolve("run-1"), module))
+                .run(stateWithUnits(1), contextLookup());
+
+        assertThat(result.exitReason()).isEqualTo(GenerateResult.ExitReason.COMPLETED);
+        assertThat(processor.invocations()).isEqualTo(1);
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("WARNING: could not back up"));
+    }
+
+    @Test
+    void withoutABackupConfiguredNothingIsCopiedAnywhere(@TempDir Path stateDir, @TempDir Path module)
+            throws java.io.IOException {
+        Path testFile = module.resolve("src/test/java/com/acme/PaymentServiceTest.java");
+        java.nio.file.Files.createDirectories(testFile.getParent());
+        java.nio.file.Files.writeString(testFile, "original");
+
+        engine(new StubUnitProcessor().thenKeeps("newTest"), new FakeModuleBuild().fullSuiteGreen(2),
+                store(stateDir)).run(stateWithUnits(1), contextLookup());
+
+        assertThat(stateDir.resolve("backups")).doesNotExist();
+    }
+
+    private static void append(Path file, String text) {
+        try {
+            java.nio.file.Files.writeString(file, java.nio.file.Files.readString(file) + text);
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    private GenerateEngine engineWithBackup(UnitProcessor processor, FakeModuleBuild build, StateStore store,
+                                            TestFileBackup backup) {
+        return new GenerateEngine(processor, build, store, new ExecutionConfig(null, null, null, null, null),
+                new ContextKeyStabilityTracker(Integer.MAX_VALUE), null, backup);
+    }
+
+    @Test
     void aModuleAlreadyFailingBeforeTheRunIsRefusedWithoutGeneratingAnything(@TempDir Path stateDir) {
         // §2: generating against a red suite makes every later "did this test pass?"
         // answer meaningless.

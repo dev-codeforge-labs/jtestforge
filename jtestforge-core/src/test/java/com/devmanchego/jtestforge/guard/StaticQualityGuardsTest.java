@@ -193,6 +193,121 @@ class StaticQualityGuardsTest {
     }
 
     /** Routes each corpus candidate to the tier its content implies. */
+    // --- guard 12: duplicate bodies --------------------------------------------------------
+
+    private static final String NEGATIVE_BAND_BODY = """
+            @Test
+            void %s() {
+                assertThrows(IllegalArgumentException.class, () -> subject.band(-1));
+            }
+            """;
+
+    @Test
+    void twoTestsWithTheSameBodyUnderDifferentNamesKeepOnlyTheFirst() {
+        // The shape seen from a local model for PricingRules#band: three tests, two of them
+        // copies of the first one under names that promise other cases.
+        List<TestCandidate> batch = List.of(
+                GuardCorpus.candidate("band_amountIsNegative_throws", NEGATIVE_BAND_BODY.formatted("band_amountIsNegative_throws")),
+                GuardCorpus.candidate("band_exactlyAtThreshold_returnsTwo", NEGATIVE_BAND_BODY.formatted("band_exactlyAtThreshold_returnsTwo")),
+                GuardCorpus.candidate("band_aboveThreshold_returnsThree", NEGATIVE_BAND_BODY.formatted("band_aboveThreshold_returnsThree")));
+
+        List<GuardRejection> rejections = guards.duplicateBodies(batch, GuardCorpus.plainUnitContext());
+
+        assertThat(rejections).extracting(GuardRejection::methodName)
+                .containsExactly("band_exactlyAtThreshold_returnsTwo", "band_aboveThreshold_returnsThree");
+        assertThat(rejections).allSatisfy(rejection -> {
+            assertThat(rejection.guardId()).isEqualTo(GuardId.DUPLICATE_BODY);
+            assertThat(rejection.reason()).contains("band_amountIsNegative_throws");
+        });
+    }
+
+    @Test
+    void formattingAndCommentsDoNotMakeTwoBodiesDifferent() {
+        TestCandidate original = GuardCorpus.candidate("first", NEGATIVE_BAND_BODY.formatted("first"));
+        TestCandidate reformatted = GuardCorpus.candidate("second", """
+                @Test
+                void second() {
+                    // negative amounts are refused
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () -> subject.band(-1));
+                }
+                """);
+
+        List<GuardRejection> rejections = guards.duplicateBodies(
+                List.of(original, reformatted), GuardCorpus.plainUnitContext());
+
+        assertThat(rejections).extracting(GuardRejection::methodName).containsExactly("second");
+    }
+
+    @Test
+    void aSingleDifferentLiteralMakesTwoTestsDifferentSoAParameterSweepIsNeverTouched() {
+        TestCandidate atThreshold = GuardCorpus.candidate("atThreshold", """
+                @Test
+                void atThreshold() {
+                    assertThat(subject.band(100_000)).isEqualTo(2);
+                }
+                """);
+        TestCandidate aboveThreshold = GuardCorpus.candidate("aboveThreshold", """
+                @Test
+                void aboveThreshold() {
+                    assertThat(subject.band(100_001)).isEqualTo(2);
+                }
+                """);
+
+        assertThat(guards.duplicateBodies(List.of(atThreshold, aboveThreshold), GuardCorpus.plainUnitContext()))
+                .isEmpty();
+    }
+
+    @Test
+    void aCandidateWhoseBodyAlreadyExistsInTheClassUnderAnotherNameIsRejected(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws java.io.IOException {
+        java.nio.file.Path testFile = dir.resolve("PricingRulesTest.java");
+        java.nio.file.Files.writeString(testFile, """
+                package com.acme;
+
+                class PricingRulesTest {
+                    @org.junit.jupiter.api.Test
+                    void bandsTheSmallestAmount() {
+                        assertThat(subject.band(5_000)).isEqualTo(1);
+                    }
+                }
+                """);
+        var existingClass = new com.devmanchego.jtestforge.model.TestClassInfo(testFile, "PricingRulesTest",
+                "com.acme", java.util.Set.of("bandsTheSmallestAmount"), List.of(),
+                com.devmanchego.jtestforge.model.InjectionStyle.INJECT_MOCKS,
+                com.devmanchego.jtestforge.model.AssertionLibrary.ASSERTJ,
+                List.of(), java.util.Map.of(), java.util.Set.of(), java.util.Set.of());
+        var context = new GuardContext(existingClass, GuardCorpus.methodReturning("int"), Tier.PLAIN_UNIT, List.of());
+        TestCandidate copy = GuardCorpus.candidate("smallAmountIsInBandOne", """
+                @org.junit.jupiter.api.Test
+                void smallAmountIsInBandOne() {
+                    assertThat(subject.band(5_000)).isEqualTo(1);
+                }
+                """);
+
+        List<GuardRejection> rejections = guards.duplicateBodies(List.of(copy), context);
+
+        assertThat(rejections).singleElement().satisfies(rejection -> {
+            assertThat(rejection.guardId()).isEqualTo(GuardId.DUPLICATE_BODY);
+            assertThat(rejection.reason()).contains("bandsTheSmallestAmount");
+        });
+    }
+
+    @Test
+    void anUnreadableTargetClassOnlyMeansFewerDuplicatesAreCaughtNeverAFailure() {
+        // GuardCorpus's class points at a file that does not exist.
+        TestCandidate candidate = GuardCorpus.candidate("unique", NEGATIVE_BAND_BODY.formatted("unique"));
+
+        assertThat(guards.duplicateBodies(List.of(candidate), GuardCorpus.plainUnitContext())).isEmpty();
+    }
+
+    @Test
+    void theGoodCorpusContainsNoDuplicateBodies() {
+        // Same hard requirement as noGoodCandidateIsEverRejected, for the batch-level guard.
+        assertThat(guards.duplicateBodies(GuardCorpus.good(), GuardCorpus.plainUnitContext())).isEmpty();
+    }
+
     private GuardContext contextFor(TestCandidate candidate) {
         String source = candidate.sourceCode();
         if (source.contains("entityManager")) {

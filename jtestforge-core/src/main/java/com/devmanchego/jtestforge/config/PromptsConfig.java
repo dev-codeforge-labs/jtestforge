@@ -15,7 +15,8 @@ public record PromptsConfig(
         String jsonSliceTests,
         String contextTests,
         String rules,
-        String springRules) {
+        String springRules,
+        String fixContract) {
 
     public PromptsConfig {
         newTestClass = defaultIfBlank(newTestClass, "prompts/new-test-class.md");
@@ -29,6 +30,15 @@ public record PromptsConfig(
         contextTests = defaultIfBlank(contextTests, "prompts/spring-context.md");
         rules = defaultIfBlank(rules, "prompts/rules.md");
         springRules = defaultIfBlank(springRules, "prompts/spring-rules.md");
+        fixContract = defaultIfBlank(fixContract, "prompts/fix-contract.md");
+    }
+
+    /** The shape this record had before {@code fixContract} existed; leaves it at its default. */
+    public PromptsConfig(String newTestClass, String additionalTests, String killMutants, String fixCompilation,
+                         String fixAssertion, String webSliceTests, String dataSliceTests, String jsonSliceTests,
+                         String contextTests, String rules, String springRules) {
+        this(newTestClass, additionalTests, killMutants, fixCompilation, fixAssertion, webSliceTests,
+                dataSliceTests, jsonSliceTests, contextTests, rules, springRules, null);
     }
 
     private static String defaultIfBlank(String value, String fallback) {
