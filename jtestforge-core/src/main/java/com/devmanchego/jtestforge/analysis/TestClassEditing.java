@@ -43,6 +43,25 @@ final class TestClassEditing {
         }
     }
 
+    private static final String STATIC_PREFIX = "static ";
+
+    /**
+     * The name an import is compared by. A candidate's import arrives as {@code static a.B.c} for a
+     * static import - the keyword kept, since the merger needs it to write the line - while
+     * JavaParser's {@code getNameAsString()} of the same declaration is {@code a.B.c}. Compared
+     * raw, the merger did not recognise an import the file already had (and added it a second time)
+     * and the reverter never found a static import it had added (and left it behind).
+     */
+    static String importKey(String requiredImport) {
+        return requiredImport.startsWith(STATIC_PREFIX)
+                ? requiredImport.substring(STATIC_PREFIX.length()).strip()
+                : requiredImport;
+    }
+
+    static boolean isStaticImport(String requiredImport) {
+        return requiredImport.startsWith(STATIC_PREFIX);
+    }
+
     /** Whether every character of {@code text} can be written in {@code charset}. */
     static boolean canEncode(java.nio.charset.Charset charset, String text) {
         return charset.newEncoder().canEncode(text);

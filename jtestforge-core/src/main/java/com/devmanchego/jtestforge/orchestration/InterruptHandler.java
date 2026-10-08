@@ -2,8 +2,6 @@ package com.devmanchego.jtestforge.orchestration;
 
 import com.devmanchego.jtestforge.analysis.TestClassReverter;
 import com.devmanchego.jtestforge.model.RunState;
-import com.devmanchego.jtestforge.model.UnitStatus;
-import com.devmanchego.jtestforge.model.WorkUnit;
 import com.devmanchego.jtestforge.state.LockFile;
 import com.devmanchego.jtestforge.state.StateStore;
 
@@ -19,7 +17,10 @@ import java.util.Optional;
  * <p>What to revert comes from the state file, which a unit updates <em>before</em> each
  * edit it makes to its test file ({@link UnitEditJournal}) - so whatever instant the
  * process dies at, the interrupted unit names every method it may have merged. Reverting
- * a method that never made it to the file is a no-op.
+ * a method that never made it to the file is a no-op. A test class the unit created is
+ * journalled the same way, and removed again if nothing is left in it. Units of this run that
+ * finished but could not undo their own edits ({@code WorkUnit#hasLeftoverEdits()}) are
+ * cleaned up too.
  *
  * <p><b>Still best-effort, backed by resume.</b> The hook runs on its own thread while the
  * main thread may still be mid-write, so it can revert a file the main thread then writes
@@ -63,7 +64,7 @@ public final class InterruptHandler {
     }
 
     /**
-     * The cleanup itself: revert every {@code IN_PROGRESS} unit's recorded edits, then
+     * The cleanup itself: revert every interrupted or leftover unit's recorded edits, then
      * release the lock. State is already flushed continuously by {@link StateStore}'s
      * write-ahead persistence (§8.2.1); nothing here needs to write it again.
      */
@@ -73,15 +74,7 @@ public final class InterruptHandler {
             lockFile.release();
             return;
         }
-        for (WorkUnit unit : state.get().units()) {
-            if (unit.status() == UnitStatus.IN_PROGRESS) {
-                revertPartialEdits(unit);
-            }
-        }
+        new PartialEditReverter(reverter, modulePath).revertUnfinished(state.get());
         lockFile.release();
-    }
-
-    private void revertPartialEdits(WorkUnit unit) {
-        new PartialEditReverter(reverter, modulePath).revert(unit);
     }
 }

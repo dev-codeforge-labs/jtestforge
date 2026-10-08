@@ -50,6 +50,11 @@ public final class TestClassReverter {
         this.charset = java.util.Objects.requireNonNull(charset, "charset");
     }
 
+    /** The encoding test files are read and written in - anything inspecting the same files must use it too. */
+    public java.nio.charset.Charset charset() {
+        return charset;
+    }
+
     public RevertResult revert(Path testFile, Collection<String> methodNames, Collection<String> importsAdded) {
         Optional<String> source = TestClassEditing.readSource(testFile, charset);
         if (source.isEmpty()) {
@@ -106,10 +111,12 @@ public final class TestClassReverter {
         }
         String remainingSource = sourceWithoutMethods(testClass, removedMethodNames);
         List<String> removed = new ArrayList<>();
+        Set<String> addedKeys = new java.util.HashSet<>();
+        importsAdded.forEach(added -> addedKeys.add(TestClassEditing.importKey(added)));
 
         for (ImportDeclaration existing : compilationUnit.getImports()) {
             String importedName = existing.getNameAsString();
-            if (!importsAdded.contains(importedName)) {
+            if (!addedKeys.contains(importedName)) {
                 continue;
             }
             if (isReferencedIn(remainingSource, simpleNameOf(importedName))) {

@@ -24,6 +24,7 @@ class HttpProviderPreflightTest {
     private int showStatus;
     private String showBody;
     private final List<String> authorizationHeaders = new ArrayList<>();
+    private final List<List<String>> contentTypesSentToShow = new ArrayList<>();
 
     @BeforeEach
     void startServer() throws IOException {
@@ -37,6 +38,7 @@ class HttpProviderPreflightTest {
         server.createContext("/api/show", exchange -> {
             authorizationHeaders.add(String.valueOf(exchange.getRequestHeaders().getFirst("Authorization")));
             exchange.getRequestBody().readAllBytes();
+            contentTypesSentToShow.add(exchange.getRequestHeaders().get("Content-Type"));
             reply(exchange, showStatus, showBody);
         });
         server.start();
@@ -124,6 +126,18 @@ class HttpProviderPreflightTest {
     }
 
     @Test
+    void aContextAboveTheModelsOwnIsJudgedAtWhatTheServerWillActuallyGive() {
+        // Review finding: 32768 configured on an 8192-token model used to pass the "does it fit"
+        // check against 32768, although every 60000-character prompt would be refused.
+        showBody = "{\"model_info\":{\"llama.context_length\":8192}}";
+
+        HttpProviderPreflight.Result result = check(Map.of("num_ctx", 32768, "num_predict", 1024), 60_000);
+
+        assertThat(result.warnings()).anySatisfy(warning -> assertThat(warning).contains("larger than the model's own"))
+                .anySatisfy(warning -> assertThat(warning).contains("may not fit").contains("21504 characters fit"));
+    }
+
+    @Test
     void aNumericStringForNumCtxIsUnderstoodLikeANumber() {
         assertThat(check(Map.of("num_ctx", "32768"), 60_000).warnings()).isEmpty();
     }
@@ -149,6 +163,15 @@ class HttpProviderPreflightTest {
         assertThat(authorizationHeaders).containsOnly("Bearer sk-very-secret");
         assertThat(String.join(" ", result.errors()) + String.join(" ", result.warnings())
                 + String.join(" ", result.notes())).doesNotContain("sk-very-secret");
+    }
+
+    @Test
+    void aConfiguredContentTypeReplacesTheDefaultInsteadOfBeingSentTwice() {
+        new HttpProviderPreflight().check(baseUrl(), "m", Map.of(),
+                Map.of("Content-Type", "application/json; charset=utf-8"), 60_000);
+
+        assertThat(contentTypesSentToShow).singleElement()
+                .satisfies(values -> assertThat(values).containsExactly("application/json; charset=utf-8"));
     }
 
     private HttpProviderPreflight.Result check(Map<String, Object> options, int maxPromptChars) {

@@ -64,6 +64,21 @@ class StateStoreTest {
     }
 
     @Test
+    void aJournalledTestFileCreationSurvivesTheRoundTripAndAnOlderStateFileReadsAsNone(@TempDir Path stateDir) {
+        StateStore store = new StateStore(stateDir, clock);
+        RunState original = runStateWithOneDoneUnit();
+        WorkUnit unit = original.units().get(0);
+
+        store.save(original.withUnits(List.of(unit.withStatus(UnitStatus.IN_PROGRESS).withCreatedTestFile(true))));
+        assertThat(store.load().orElseThrow().units().get(0).createdTestFile()).isTrue();
+
+        // false is the default, so it is not written at all - exactly how files from before it look
+        store.save(original);
+        assertThat(stateDir.resolve("state.json")).content().doesNotContain("createdTestFile");
+        assertThat(store.load().orElseThrow().units().get(0).createdTestFile()).isFalse();
+    }
+
+    @Test
     void aTruncatedStateFileIsDetectedRatherThanTreatedAsAFreshStart(@TempDir Path stateDir) throws IOException {
         // The exact failure §8.2.2 exists to prevent: a kill during a write. Reading this
         // as "no state, start over" would silently discard a completed run's bookkeeping.

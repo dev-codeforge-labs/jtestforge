@@ -232,9 +232,14 @@ final class GenerateRunner {
      * {@code <stateDir>/dry-run/} for the user to read. No AI provider is created or called, no
      * test file is written, backed up or created, and {@code state.json} is not touched - so a
      * later real run starts exactly as if this had never happened.
+     *
+     * <p>Which units are listed follows what the real run would do: with a state file and no
+     * {@code --restart} that is the units of that state, as reconciled against the filesystem
+     * (in-memory only - reconciling is pure), minus those already done; otherwise every
+     * pending unit discovered. Without this the preview listed units a resume would skip.
      */
     DryRunReport dryRun(List<DiscoveredUnit> discovered, String providerId,
-                        TierRestriction restriction, int maxUnitsOverride) {
+                        TierRestriction restriction, int maxUnitsOverride, boolean restart) {
         Map<String, DiscoveredUnit> byUnitId = new LinkedHashMap<>();
         for (DiscoveredUnit unit : discovered) {
             byUnitId.put(unit.workUnit().id().format(), unit);
@@ -243,8 +248,11 @@ final class GenerateRunner {
         UnitPromptFactory factory = promptFactory(providerId);
         Path promptDir = stateDir.resolve("dry-run");
 
+        Map<String, com.devmanchego.jtestforge.model.UnitStatus> resumed = restart ? null : statusesOfResumedRun();
         List<WorkUnit> pending = discovered.stream().map(DiscoveredUnit::workUnit)
-                .filter(unit -> unit.status() == com.devmanchego.jtestforge.model.UnitStatus.PENDING)
+                .filter(unit -> resumed == null
+                        ? unit.status() == com.devmanchego.jtestforge.model.UnitStatus.PENDING
+                        : resumed.get(unit.id().format()) == com.devmanchego.jtestforge.model.UnitStatus.PENDING)
                 .filter(unit -> restriction.allows(unit.tier()))
                 .toList();
         List<String> wouldAttempt = new java.util.ArrayList<>();
@@ -269,6 +277,27 @@ final class GenerateRunner {
                     + context.testFile().getFileName() + ", prompt " + prompt.length() + " chars]");
         }
         return new DryRunReport(wouldAttempt, skipped, promptDir);
+    }
+
+    /**
+     * The status each unit of an existing state file would have when a real run starts from it,
+     * or {@code null} when there is no state (a real run then starts every discovered unit
+     * fresh). A state that cannot be read is treated as absent: the real run reports it.
+     */
+    private Map<String, com.devmanchego.jtestforge.model.UnitStatus> statusesOfResumedRun() {
+        try {
+            var existing = stateStore.load();
+            if (existing.isEmpty()) {
+                return null;
+            }
+            var reconciled = new ResumeReconciler(new TestClassScanner(sourceCharset())::testMethodNames)
+                    .reconcile(existing.get(), modulePath, configHash).state();
+            Map<String, com.devmanchego.jtestforge.model.UnitStatus> statuses = new LinkedHashMap<>();
+            reconciled.units().forEach(unit -> statuses.put(unit.id().format(), unit.status()));
+            return statuses;
+        } catch (com.devmanchego.jtestforge.state.StateCorruptException e) {
+            return null;
+        }
     }
 
     /** What a dry run found: the units a real run would attempt, in order, and where their prompts are. */
@@ -347,6 +376,8 @@ final class GenerateRunner {
      * discards it and starts over with freshly discovered units.
      */
     private RunState loadOrCreateState(List<DiscoveredUnit> discovered, String providerId, boolean restart) {
+        var partialEditReverter = new com.devmanchego.jtestforge.orchestration.PartialEditReverter(
+                testClassReverter(), modulePath);
         if (!restart) {
             var existing = stateStore.load();
             if (existing.isPresent()) {
@@ -354,16 +385,35 @@ final class GenerateRunner {
                 var reconciliation = reconciler.reconcile(existing.get(), modulePath, configHash);
                 // The loaded state, not reconciliation.state(): reconciling resets each
                 // interrupted unit and clears the very lists that say what to revert.
-                new com.devmanchego.jtestforge.orchestration.PartialEditReverter(testClassReverter(), modulePath)
-                        .revert(existing.get(), reconciliation.unitsNeedingRevert());
+                partialEditReverter.revert(existing.get(), reconciliation.unitsNeedingRevert());
                 return reconciliation.state();
             }
+        } else {
+            revertUnfinishedBeforeRestart(partialEditReverter);
         }
         return RunState.startNew(UUID.randomUUID().toString(), Instant.now(), Phase.GENERATE,
                         modulePath.toString(), configHash, providerId, springTierState,
                         discovered.stream().map(DiscoveredUnit::workUnit).toList())
                 .withBaseline(new Baseline(aggregateLineCoverage(), aggregateBranchCoverage(),
                         null, totalOpenGaps(discovered)));
+    }
+
+    /**
+     * {@code --restart} discards the state, and with it the only record of what an interrupted
+     * unit left in a test file - so that is taken out first, exactly as resume would. A state
+     * file that cannot be read is often the very reason for {@code --restart}; then there is no
+     * record to act on, and the restart goes ahead.
+     */
+    private void revertUnfinishedBeforeRestart(
+            com.devmanchego.jtestforge.orchestration.PartialEditReverter partialEditReverter) {
+        try {
+            stateStore.load().ifPresent(partialEditReverter::revertUnfinished);
+        } catch (com.devmanchego.jtestforge.state.StateCorruptException e) {
+            if (progress != null) {
+                progress.accept("WARNING: the previous run state could not be read (" + e.getMessage()
+                        + "); edits an interrupted unit may have left in a test file cannot be undone automatically.");
+            }
+        }
     }
 
     private int totalOpenGaps(List<DiscoveredUnit> discovered) {

@@ -242,6 +242,52 @@ class DefaultUnitProcessorTest {
     }
 
     @Test
+    void creatingTheSkeletonIsJournalledBeforeTheWriteAndReleasedOnceTheUnitIsDoneWithIt() throws IOException {
+        // A kill during the AI call has to find "this unit created the file" in the state.
+        provider.enqueueResponse("I could not think of any test for this method.")
+                .enqueueResponse("Still no tests, sorry.");
+        UnitContext noTestClassYet = context().withTestClassInfo(null);
+        Files.delete(testFile);
+        List<String> journal = new java.util.ArrayList<>();
+        UnitEditJournal recording = new UnitEditJournal() {
+            @Override
+            public void record(List<String> addedTests, List<String> addedImports) {
+                journal.add("record " + addedTests);
+            }
+
+            @Override
+            public void recordCreatedTestFile(boolean created) {
+                journal.add("created=" + created + " fileExists=" + Files.exists(testFile));
+            }
+        };
+
+        processor().process(noTestClassYet, recording);
+
+        assertThat(journal).containsExactly("created=true fileExists=false", "created=false fileExists=false");
+    }
+
+    @Test
+    void aTestFileThatAlreadyExistedIsNeverJournalledAsCreated() throws IOException {
+        provider.enqueueResponse("I could not think of any test for this method.")
+                .enqueueResponse("Still no tests, sorry.");
+        List<Boolean> created = new java.util.ArrayList<>();
+        UnitEditJournal recording = new UnitEditJournal() {
+            @Override
+            public void record(List<String> addedTests, List<String> addedImports) {
+            }
+
+            @Override
+            public void recordCreatedTestFile(boolean value) {
+                created.add(value);
+            }
+        };
+
+        processor().process(context(), recording);
+
+        assertThat(created).isEmpty();
+    }
+
+    @Test
     void aTestClassThatAlreadyExistedIsNeverDeletedWhenTheUnitFails() throws IOException {
         provider.enqueueResponse("I could not think of any test for this method.")
                 .enqueueResponse("Still no tests, sorry.");
@@ -664,6 +710,32 @@ class DefaultUnitProcessorTest {
         assertThat(provider.receivedPrompts().get(2)).contains("cannot find symbol: nope")
                 .doesNotContain("Your previous answer could not be used");
         assertThat(Files.readString(testFile)).isEqualTo(EXISTING_TEST_CLASS);
+    }
+
+    @Test
+    void theCorrectivePromptOfARepairRoundStillShowsTheCompilerErrorsBeingRepaired() throws IOException {
+        // Review finding: the corrective prompt used to drop them, so the model reformatted a
+        // repair without seeing what it was repairing.
+        provider.enqueueResponse(response("firstAttempt", "assertThat(subject.nope()).isEqualTo(2);"))
+                .enqueueResponse("a repair with no fenced block at all")
+                .enqueueResponse(response("firstAttempt", "assertThat(subject.classify(1)).isEqualTo(0);"));
+        build.failsToCompile("cannot find symbol: nope");
+
+        processor().process(context());
+
+        String corrective = provider.receivedPrompts().get(2);
+        assertThat(corrective).contains("Your previous answer could not be used")
+                .contains("cannot find symbol: nope");
+    }
+
+    @Test
+    void theCorrectivePromptOfAFirstAttemptSaysThereWasNothingToRepair() throws IOException {
+        provider.enqueueResponse("no fenced block at all").enqueueResponse("still none");
+
+        processor().process(context());
+
+        assertThat(provider.receivedPrompts().get(1)).contains("Your previous answer could not be used")
+                .doesNotContain("cannot find symbol");
     }
 
     @Test

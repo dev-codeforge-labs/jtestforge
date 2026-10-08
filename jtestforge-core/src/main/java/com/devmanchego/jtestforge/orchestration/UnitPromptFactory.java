@@ -66,12 +66,17 @@ public final class UnitPromptFactory {
      * @param previousResponse the unusable answer, shown back so the model can resend its tests
      *                         in the right shape; capped, and with {@code {{} defused so nothing in
      *                         it can be mistaken for a placeholder when the template is rendered
+     * @param compilerErrors   when the unusable answer was a reply to {@code fix-compilation.md}: the
+     *                         errors it was answering, so the model is not asked to reformat a repair
+     *                         without seeing what it was repairing; empty otherwise
+     * @param failures         likewise for a reply to {@code fix-assertion.md}
      */
-    public String fixContractPrompt(UnitContext context, String violation, String previousResponse) {
+    public String fixContractPrompt(UnitContext context, String violation, String previousResponse,
+                                    List<CompilerError> compilerErrors, List<SurefireTestResult> failures) {
         String shown = PromptRenderer.capValue(previousResponse == null ? "" : previousResponse,
                 MAX_PREVIOUS_RESPONSE_CHARS).replace("{{", "{ {");
         return renderer.render(templates.get(PromptTemplateId.FIX_CONTRACT),
-                fullContext(context, List.of(), List.of(), violation, shown));
+                fullContext(context, compilerErrors, failures, violation, shown));
     }
 
     /**

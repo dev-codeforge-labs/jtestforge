@@ -84,6 +84,51 @@ class TestClassMergerTest {
     }
 
     @Test
+    void aStaticImportTheFileAlreadyHasIsNotAddedAgain(@TempDir Path dir) throws IOException {
+        // Seen in real runs: the model asks for `static org.assertj...assertThatThrownBy` and the
+        // file already had `import static ...;` - compared raw, the two never matched.
+        Path testFile = write(dir, """
+                package com.acme;
+
+                import org.junit.jupiter.api.Test;
+
+                import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+                class PaymentServiceTest {
+
+                    @Test
+                    void anExistingTest() {
+                        assertThatThrownBy(() -> { }).isNull();
+                    }
+                }
+                """);
+
+        MergeResult result = merger.merge(testFile, List.of(candidate("newTest", """
+                @Test
+                void newTest() {
+                    assertThatThrownBy(() -> { }).isNull();
+                }
+                """, List.of("static org.assertj.core.api.Assertions.assertThatThrownBy"))));
+
+        assertThat(Files.readString(testFile).split("assertThatThrownBy;", -1)).hasSize(2);
+        assertThat(result.addedImports()).isEmpty();
+    }
+
+    @Test
+    void theSameStaticImportRequestedByTwoCandidatesIsAddedOnce(@TempDir Path dir) throws IOException {
+        Path testFile = write(dir, simpleTestClass());
+        String staticImport = "static org.assertj.core.api.Assertions.assertThatThrownBy";
+
+        MergeResult result = merger.merge(testFile, List.of(
+                candidate("firstNew", "@Test\nvoid firstNew() { assertThatThrownBy(() -> { }); }\n", List.of(staticImport)),
+                candidate("secondNew", "@Test\nvoid secondNew() { assertThatThrownBy(() -> { }); }\n", List.of(staticImport))));
+
+        assertThat(Files.readString(testFile).split("import static org\\.assertj\\.core\\.api\\.Assertions\\.assertThatThrownBy;", -1))
+                .hasSize(2);
+        assertThat(result.addedImports()).containsExactly(staticImport);
+    }
+
+    @Test
     void aCandidateWhoseNameCollidesWithAnExistingTestIsRejected(@TempDir Path dir) throws IOException {
         Path testFile = write(dir, simpleTestClass());
         String original = Files.readString(testFile);

@@ -40,6 +40,12 @@ import java.util.Objects;
  * @param durationMillis      wall-clock time spent on this unit
  * @param lastError           short description of the most recent failure, if any
  * @param skipReason          why the unit was skipped, for the SKIPPED_* statuses
+ * @param createdTestFile     whether this unit wrote {@code testFile} as a new skeleton class.
+ *                            Journalled before the skeleton is written, like {@code addedTests}
+ *                            (see {@code UnitEditJournal}), so that a unit killed mid-way - most
+ *                            often during the AI call, before it merged anything - does not
+ *                            leave an empty test class behind. Only meaningful while the unit's
+ *                            edits are still to be undone: a finished unit cleaned up after itself
  */
 @JsonInclude(JsonInclude.Include.NON_DEFAULT)
 public record WorkUnit(
@@ -59,7 +65,8 @@ public record WorkUnit(
         int branchesCoveredDelta,
         long durationMillis,
         String lastError,
-        String skipReason) {
+        String skipReason,
+        boolean createdTestFile) {
 
     public WorkUnit {
         Objects.requireNonNull(id, "id");
@@ -69,6 +76,17 @@ public record WorkUnit(
         discardedTests = discardedTests == null ? List.of() : List.copyOf(discardedTests);
         semanticGapsClosed = semanticGapsClosed == null ? List.of() : List.copyOf(semanticGapsClosed);
         mutantsKilled = mutantsKilled == null ? List.of() : List.copyOf(mutantsKilled);
+    }
+
+    /** The shape this record had before {@code createdTestFile} was journalled. */
+    public WorkUnit(WorkUnitId id, String testFile, String sourceFile, String sourceHash, String testFileHash,
+                    UnitStatus status, int attempts, List<String> addedTests, List<String> addedImports,
+                    List<String> discardedTests, List<String> semanticGapsClosed, List<String> mutantsKilled,
+                    int linesCoveredDelta, int branchesCoveredDelta, long durationMillis, String lastError,
+                    String skipReason) {
+        this(id, testFile, sourceFile, sourceHash, testFileHash, status, attempts, addedTests, addedImports,
+                discardedTests, semanticGapsClosed, mutantsKilled, linesCoveredDelta, branchesCoveredDelta,
+                durationMillis, lastError, skipReason, false);
     }
 
     /** A freshly discovered unit, not yet attempted. */
@@ -93,43 +111,61 @@ public record WorkUnit(
     public WorkUnit withStatus(UnitStatus newStatus) {
         return new WorkUnit(id, testFile, sourceFile, sourceHash, testFileHash, newStatus, attempts,
                 addedTests, addedImports, discardedTests, semanticGapsClosed, mutantsKilled,
-                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason);
+                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason, createdTestFile);
     }
 
     public WorkUnit withStatusAndError(UnitStatus newStatus, String error) {
         return new WorkUnit(id, testFile, sourceFile, sourceHash, testFileHash, newStatus, attempts,
                 addedTests, addedImports, discardedTests, semanticGapsClosed, mutantsKilled,
-                linesCoveredDelta, branchesCoveredDelta, durationMillis, error, skipReason);
+                linesCoveredDelta, branchesCoveredDelta, durationMillis, error, skipReason, createdTestFile);
     }
 
     public WorkUnit withSkipped(UnitStatus newStatus, String reason) {
         return new WorkUnit(id, testFile, sourceFile, sourceHash, testFileHash, newStatus, attempts,
                 addedTests, addedImports, discardedTests, semanticGapsClosed, mutantsKilled,
-                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, reason);
+                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, reason, createdTestFile);
     }
 
     public WorkUnit withAttempts(int newAttempts) {
         return new WorkUnit(id, testFile, sourceFile, sourceHash, testFileHash, status, newAttempts,
                 addedTests, addedImports, discardedTests, semanticGapsClosed, mutantsKilled,
-                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason);
+                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason, createdTestFile);
     }
 
     public WorkUnit withTestFileHash(String newTestFileHash) {
         return new WorkUnit(id, testFile, sourceFile, sourceHash, newTestFileHash, status, attempts,
                 addedTests, addedImports, discardedTests, semanticGapsClosed, mutantsKilled,
-                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason);
+                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason, createdTestFile);
     }
 
     public WorkUnit withAdded(List<String> newAddedTests, List<String> newAddedImports) {
         return new WorkUnit(id, testFile, sourceFile, sourceHash, testFileHash, status, attempts,
                 newAddedTests, newAddedImports, discardedTests, semanticGapsClosed, mutantsKilled,
-                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason);
+                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason, createdTestFile);
+    }
+
+    public WorkUnit withCreatedTestFile(boolean newCreatedTestFile) {
+        return new WorkUnit(id, testFile, sourceFile, sourceHash, testFileHash, status, attempts,
+                addedTests, addedImports, discardedTests, semanticGapsClosed, mutantsKilled,
+                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason, newCreatedTestFile);
+    }
+
+    /**
+     * Whether this finished unit still names test-file edits nobody undid. A {@code DONE} unit's
+     * {@code addedTests} are its kept tests; every other finished status is written with empty
+     * lists and no {@code createdTestFile}, so anything recorded means the unit's own rollback
+     * failed and the edits are still in the file. {@code IN_PROGRESS} units are not covered: an
+     * interrupted unit is reverted whatever it recorded.
+     */
+    public boolean hasLeftoverEdits() {
+        return status != UnitStatus.DONE && status != UnitStatus.IN_PROGRESS
+                && (!addedTests.isEmpty() || !addedImports.isEmpty() || createdTestFile);
     }
 
     public WorkUnit withAddedTests(List<String> newAddedTests) {
         return new WorkUnit(id, testFile, sourceFile, sourceHash, testFileHash, status, attempts,
                 newAddedTests, addedImports, discardedTests, semanticGapsClosed, mutantsKilled,
-                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason);
+                linesCoveredDelta, branchesCoveredDelta, durationMillis, lastError, skipReason, createdTestFile);
     }
 
     /**

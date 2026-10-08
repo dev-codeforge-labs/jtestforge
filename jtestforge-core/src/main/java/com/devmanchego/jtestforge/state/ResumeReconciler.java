@@ -79,7 +79,15 @@ public final class ResumeReconciler {
                     // Whether the FAILED_* and DISCARDED_* statuses are retried is the
                     // --retry-failed decision (§8.1), made by the engine when it selects
                     // work. Reconciliation must not pre-empt it.
-                    reconciledUnits.add(unit);
+                    if (unit.hasLeftoverEdits()) {
+                        // The unit failed and its own rollback failed too, so its journal
+                        // still names edits in the file. They come out like an interrupted
+                        // unit's; the status - and so the retry decision - is left as it is.
+                        unitsNeedingRevert.add(unit.id());
+                        reconciledUnits.add(unit.withAdded(List.of(), List.of()).withCreatedTestFile(false));
+                    } else {
+                        reconciledUnits.add(unit);
+                    }
                 }
             }
         }

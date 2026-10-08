@@ -185,6 +185,23 @@ class TestClassMergeRoundTripTest {
         assertThat(Files.readString(testFile)).isEqualTo(original);
     }
 
+    @Test
+    void aStaticImportTheMergeAddedIsTakenOutAgainByTheRevert(@TempDir Path dir) throws IOException {
+        // The reverter used to compare `static a.B.c` with JavaParser's `a.B.c` and never match,
+        // so a discarded unit left its static import behind.
+        Path testFile = write(dir, HAND_WRITTEN_TEST_CLASS);
+        String original = Files.readString(testFile);
+        String staticImport = "static org.assertj.core.api.Assertions.assertThatThrownBy";
+
+        MergeResult merged = merger.merge(testFile, List.of(candidate("throwsOnNegative",
+                "@Test\nvoid throwsOnNegative() { assertThatThrownBy(() -> { }); }\n", List.of(staticImport))));
+        assertThat(Files.readString(testFile)).contains("import static org.assertj.core.api.Assertions.assertThatThrownBy;");
+
+        reverter.revert(testFile, merged.addedTestNames(), merged.addedImports());
+
+        assertThat(Files.readString(testFile)).isEqualTo(original);
+    }
+
     private TestCandidate candidate(String name, String source, List<String> imports) {
         return new TestCandidate(name, source, imports);
     }

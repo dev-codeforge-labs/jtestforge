@@ -142,6 +142,26 @@ class ResumeReconcilerTest {
     }
 
     @Test
+    void aFailedUnitWhoseRollbackFailedIsSurfacedForRevertButKeepsItsStatus(@TempDir Path module)
+            throws IOException {
+        String sourceHash = writeSource(module, "public class PaymentService { }");
+        WorkUnit leftover = doneUnit(sourceHash).withStatus(UnitStatus.PROVIDER_ERROR)
+                .withAdded(List.of("halfMerged"), List.of("java.time.Clock")).withCreatedTestFile(true);
+        ResumeReconciler reconciler = new ResumeReconciler(inspectorReturning(Set.of()));
+
+        ReconciliationResult result = reconciler.reconcile(stateWith(leftover), module, CONFIG_HASH);
+
+        assertThat(result.unitsNeedingRevert()).containsExactly(unitId);
+        WorkUnit reconciled = result.state().unit(unitId).orElseThrow();
+        // the retry decision is not reconciliation's to make; the journal, once acted on, is spent
+        assertThat(reconciled.status()).isEqualTo(UnitStatus.PROVIDER_ERROR);
+        assertThat(reconciled.addedTests()).isEmpty();
+        assertThat(reconciled.addedImports()).isEmpty();
+        assertThat(reconciled.createdTestFile()).isFalse();
+        assertThat(result.resets()).isEmpty();
+    }
+
+    @Test
     void reconciliationInspectsEveryDoneUnitIndependently(@TempDir Path module) throws IOException {
         String sourceHash = writeSource(module, "public class PaymentService { }");
         writeTestFile(module);

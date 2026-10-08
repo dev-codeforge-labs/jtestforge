@@ -65,6 +65,8 @@ class GenerateEngineTest {
             public UnitOutcome process(UnitContext context, UnitEditJournal journal) {
                 journal.record(List.of("halfMerged"), List.of("java.time.Clock"));
                 onDiskMidUnit.add(store.load().orElseThrow().units().get(0));
+                // what DefaultUnitProcessor.revert does once the file is clean again
+                journal.record(List.of(), List.of());
                 return UnitOutcome.failed(UnitStatus.FAILED_COMPILE, "never compiled", List.of());
             }
         };
@@ -76,10 +78,67 @@ class GenerateEngineTest {
             assertThat(unit.addedTests()).containsExactly("halfMerged");
             assertThat(unit.addedImports()).containsExactly("java.time.Clock");
         });
-        // The unit's own outcome is the last word: a failed unit has reverted everything.
         WorkUnit finalUnit = store.load().orElseThrow().units().get(0);
         assertThat(finalUnit.status()).isEqualTo(UnitStatus.FAILED_COMPILE);
         assertThat(finalUnit.addedTests()).isEmpty();
+        assertThat(finalUnit.hasLeftoverEdits()).isFalse();
+    }
+
+    @Test
+    void aUnitWhoseRollbackFailedKeepsItsJournalSoTheEditsAreNotLostTrackOf(@TempDir Path stateDir) {
+        // Review finding: the failed outcome's empty lists used to overwrite the journal, so tests
+        // a failed rollback left in the file (a file locked by an IDE, say) were recorded nowhere.
+        StateStore store = store(stateDir);
+        List<String> progress = new ArrayList<>();
+        UnitProcessor processor = journalAwareProcessor(journal -> {
+            journal.recordCreatedTestFile(true);
+            journal.record(List.of("halfMerged"), List.of("java.time.Clock"));
+            throw new java.io.UncheckedIOException(new java.nio.file.AccessDeniedException("PaymentServiceTest.java"));
+        });
+
+        new GenerateEngine(processor, new FakeModuleBuild().fullSuiteGreen(2), store,
+                new ExecutionConfig(null, null, null, null, null),
+                new ContextKeyStabilityTracker(Integer.MAX_VALUE), progress::add)
+                .run(stateWithUnits(1), contextLookup());
+
+        WorkUnit finalUnit = store.load().orElseThrow().units().get(0);
+        assertThat(finalUnit.status()).isEqualTo(UnitStatus.PROVIDER_ERROR);
+        assertThat(finalUnit.addedTests()).containsExactly("halfMerged");
+        assertThat(finalUnit.addedImports()).containsExactly("java.time.Clock");
+        assertThat(finalUnit.createdTestFile()).isTrue();
+        assertThat(finalUnit.hasLeftoverEdits()).isTrue();
+        assertThat(progress).anySatisfy(line -> assertThat(line).contains("could not undo"));
+    }
+
+    @Test
+    void aCreatedTestFileIsJournalledWhileTheUnitRunsAndForgottenOnceItIsDoneWithIt(@TempDir Path stateDir) {
+        StateStore store = store(stateDir);
+        List<Boolean> onDiskMidUnit = new ArrayList<>();
+        UnitProcessor processor = journalAwareProcessor(journal -> {
+            journal.recordCreatedTestFile(true);
+            onDiskMidUnit.add(store.load().orElseThrow().units().get(0).createdTestFile());
+            journal.recordCreatedTestFile(false);
+            return UnitOutcome.failed(UnitStatus.FAILED_COMPILE, "never compiled", List.of());
+        });
+
+        engine(processor, new FakeModuleBuild().fullSuiteGreen(2), store).run(stateWithUnits(1), contextLookup());
+
+        assertThat(onDiskMidUnit).containsExactly(true);
+        assertThat(store.load().orElseThrow().units().get(0).createdTestFile()).isFalse();
+    }
+
+    private static UnitProcessor journalAwareProcessor(Function<UnitEditJournal, UnitOutcome> body) {
+        return new UnitProcessor() {
+            @Override
+            public UnitOutcome process(UnitContext context) {
+                throw new AssertionError("the engine must call the journal-aware process()");
+            }
+
+            @Override
+            public UnitOutcome process(UnitContext context, UnitEditJournal journal) {
+                return body.apply(journal);
+            }
+        };
     }
 
     // --- phase 5a: execution.backupOriginalTests -------------------------------------------------
@@ -299,6 +358,24 @@ class GenerateEngineTest {
         assertThat(processor.invocations()).isEqualTo(2);
         assertThat(store.load().orElseThrow().units()).extracting(WorkUnit::status)
                 .containsExactly(UnitStatus.DONE, UnitStatus.DONE, UnitStatus.PENDING);
+    }
+
+    @Test
+    void unitsSkippedBecauseTheirTestFileIsUnreadableDoNotUseUpTheUnitBudget(@TempDir Path stateDir) {
+        // The AI is never asked for them, so --max-units 2 must still reach two real units.
+        StubUnitProcessor processor = new StubUnitProcessor()
+                .thenFails(UnitStatus.SKIPPED_TEST_FILE_UNREADABLE, "unreadable")
+                .thenFails(UnitStatus.SKIPPED_TEST_FILE_UNREADABLE, "unreadable")
+                .thenKeeps("first").thenKeeps("second").thenKeeps("third");
+        StateStore store = store(stateDir);
+
+        engineWithMaxUnits(2, processor, new FakeModuleBuild().fullSuiteGreen(2), store)
+                .run(stateWithUnits(5), contextLookup());
+
+        assertThat(processor.invocations()).isEqualTo(4);
+        assertThat(store.load().orElseThrow().units()).extracting(WorkUnit::status)
+                .containsExactly(UnitStatus.SKIPPED_TEST_FILE_UNREADABLE, UnitStatus.SKIPPED_TEST_FILE_UNREADABLE,
+                        UnitStatus.DONE, UnitStatus.DONE, UnitStatus.PENDING);
     }
 
     @Test
