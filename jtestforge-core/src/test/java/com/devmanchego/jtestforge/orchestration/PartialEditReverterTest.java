@@ -91,6 +91,132 @@ class PartialEditReverterTest {
         assertThat(Files.readString(testFile)).isEqualTo(untouched);
     }
 
+    // --- a test class the interrupted unit created ---------------------------------------------
+
+    @Test
+    void aSkeletonTheUnitCreatedIsRemovedWhenItWasKilledBeforeMergingAnything() throws IOException {
+        // The common kill: during the AI call, right after the skeleton was written.
+        Path testFile = writeTestFile("""
+                package com.acme;
+
+                import org.junit.jupiter.api.Test;
+
+                class PaymentServiceTest {
+                }
+                """);
+        WorkUnit unit = interruptedUnit().withCreatedTestFile(true);
+
+        new PartialEditReverter(new TestClassReverter(), moduleDir).revert(unit);
+
+        assertThat(testFile).doesNotExist();
+    }
+
+    @Test
+    void aSkeletonTheUnitCreatedIsRemovedOnceItsHalfMergedTestIsTakenOut() throws IOException {
+        Path testFile = writeTestFile("""
+                package com.acme;
+
+                import java.time.Clock;
+                import org.junit.jupiter.api.Test;
+
+                class PaymentServiceTest {
+
+                    @Test
+                    void halfMerged() {
+                        Clock clock = Clock.systemUTC();
+                    }
+                }
+                """);
+        WorkUnit unit = interruptedUnit().withAdded(List.of("halfMerged"), List.of("java.time.Clock"))
+                .withCreatedTestFile(true);
+
+        new PartialEditReverter(new TestClassReverter(), moduleDir).revert(unit);
+
+        assertThat(testFile).doesNotExist();
+    }
+
+    @Test
+    void aCreatedClassThatHoldsAnyOtherTestIsKept() throws IOException {
+        Path testFile = writeHalfMergedTestClass();
+        WorkUnit unit = interruptedUnit().withAdded(List.of("halfMerged"), List.of("java.time.Clock"))
+                .withCreatedTestFile(true);
+
+        new PartialEditReverter(new TestClassReverter(), moduleDir).revert(unit);
+
+        assertThat(Files.readString(testFile)).contains("void anExistingTest()").doesNotContain("halfMerged");
+    }
+
+    @Test
+    void anEmptyClassTheUnitDidNotCreateIsNeverDeleted() throws IOException {
+        Path testFile = writeTestFile("""
+                package com.acme;
+
+                class PaymentServiceTest {
+                }
+                """);
+
+        new PartialEditReverter(new TestClassReverter(), moduleDir).revert(interruptedUnit());
+
+        assertThat(testFile).exists();
+    }
+
+    // --- revertUnfinished: shutdown hook and --restart ------------------------------------------
+
+    @Test
+    void revertUnfinishedTakesOutInterruptedAndLeftoverUnitsButNeverADoneUnitsTests() throws IOException {
+        Path testFile = writeTestFile("""
+                package com.acme;
+
+                import org.junit.jupiter.api.Test;
+
+                class PaymentServiceTest {
+
+                    @Test
+                    void kept() {
+                    }
+
+                    @Test
+                    void interrupted() {
+                    }
+
+                    @Test
+                    void leftOverByAFailedRollback() {
+                    }
+                }
+                """);
+        WorkUnit done = unit("a()").withStatus(UnitStatus.DONE).withAdded(List.of("kept"), List.of());
+        WorkUnit interrupted = unit("b()").withStatus(UnitStatus.IN_PROGRESS)
+                .withAdded(List.of("interrupted"), List.of());
+        WorkUnit leftover = unit("c()").withStatus(UnitStatus.PROVIDER_ERROR)
+                .withAdded(List.of("leftOverByAFailedRollback"), List.of());
+
+        new PartialEditReverter(new TestClassReverter(), moduleDir).revertUnfinished(stateWith(done, interrupted, leftover));
+
+        assertThat(Files.readString(testFile)).contains("void kept()")
+                .doesNotContain("interrupted").doesNotContain("leftOverByAFailedRollback");
+    }
+
+    private Path writeTestFile(String content) throws IOException {
+        Path testFile = moduleDir.resolve(RELATIVE_TEST_FILE);
+        Files.createDirectories(testFile.getParent());
+        Files.writeString(testFile, content);
+        return testFile;
+    }
+
+    private WorkUnit interruptedUnit() {
+        return unit("classify(int)").withStatus(UnitStatus.IN_PROGRESS);
+    }
+
+    private WorkUnit unit(String method) {
+        return WorkUnit.pending(WorkUnitId.of("com.acme.PaymentService", method, Tier.PLAIN_UNIT), RELATIVE_TEST_FILE,
+                "src/main/java/com/acme/PaymentService.java", "sha256:src");
+    }
+
+    private RunState stateWith(WorkUnit... units) {
+        return RunState.startNew("run-1", Instant.parse("2026-10-06T10:00:00Z"), Phase.GENERATE,
+                moduleDir.toString(), "sha256:cfg", "claude", SpringTierState.springDisabled(40), List.of(units));
+    }
+
     private Path writeHalfMergedTestClass() throws IOException {
         Path testFile = moduleDir.resolve(RELATIVE_TEST_FILE);
         Files.createDirectories(testFile.getParent());

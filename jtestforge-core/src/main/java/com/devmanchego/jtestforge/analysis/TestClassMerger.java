@@ -206,7 +206,7 @@ public final class TestClassMerger {
         List<String> added = new ArrayList<>();
         for (TestCandidate candidate : candidates) {
             for (String required : candidate.requiredImports()) {
-                if (!alreadyImported.add(required)) {
+                if (!alreadyImported.add(TestClassEditing.importKey(required))) {
                     continue;
                 }
                 editor.insert(importInsertionOffset(editor, compilationUnit, required),
@@ -221,7 +221,9 @@ public final class TestClassMerger {
             SourceTextEditor editor, CompilationUnit compilationUnit, String newImport) {
         List<ImportDeclaration> imports = compilationUnit.getImports();
         for (ImportDeclaration existing : imports) {
-            if (existing.isStatic() || existing.getNameAsString().compareTo(newImport) <= 0) {
+            // a new static import has no sorted place among the others: it goes after the last import
+            if (TestClassEditing.isStaticImport(newImport) || existing.isStatic()
+                    || existing.getNameAsString().compareTo(newImport) <= 0) {
                 continue;
             }
             return editor.startOfLineContaining(

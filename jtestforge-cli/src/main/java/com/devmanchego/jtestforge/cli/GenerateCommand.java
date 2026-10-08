@@ -166,7 +166,8 @@ public final class GenerateCommand implements Callable<Integer> {
             }
             return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
         }
-        if (providerConfig.isHttp() && !checkHttpProvider(console, providerId, providerConfig,
+        // A dry run calls no provider, so it must not need the model server to be up either.
+        if (providerConfig.isHttp() && !dryRun(config) && !checkHttpProvider(console, providerId, providerConfig,
                 runner.effectiveMaxPromptChars(providerId))) {
             return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
         }
@@ -183,8 +184,9 @@ public final class GenerateCommand implements Callable<Integer> {
                 return ExitCodes.CONFIGURATION_OR_PREFLIGHT_ERROR;
             }
             runner.moduleResolution().report(console);
-            if (dryRunFlag || config.execution().dryRun()) {
-                return printDryRun(console, runner.dryRun(discovered, providerId, tierRestriction(), maxUnits));
+            if (dryRun(config)) {
+                return printDryRun(console,
+                        runner.dryRun(discovered, providerId, tierRestriction(), maxUnits, restart));
             }
             // An HTTP provider starts no process, so it needs no (isolated) working directory.
             AiProvider provider = AiProviderFactory.create(providerId, providerConfig,
@@ -244,6 +246,10 @@ public final class GenerateCommand implements Callable<Integer> {
         result.warnings().forEach(warning -> console.warn("aiProvider.providers." + providerId + ": " + warning));
         result.errors().forEach(error -> console.error("aiProvider.providers." + providerId + ": " + error));
         return result.isUsable();
+    }
+
+    private boolean dryRun(JTestForgeConfig config) {
+        return dryRunFlag || config.execution().dryRun();
     }
 
     private Integer printDryRun(ConsoleOutput console, GenerateRunner.DryRunReport report) {

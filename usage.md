@@ -184,7 +184,7 @@ Implemented options:
 | `--tier <tier>` | Restrict to one or more tiers (repeatable): `PLAIN_UNIT`, `WEB_SLICE`, `DATA_SLICE`, `JSON_SLICE`, `CONTEXT_SLICE`. Mutually exclusive with `--no-spring`. |
 | `--no-spring` | Restrict to `PLAIN_UNIT` only — a fast run that loads no Spring context. |
 | `--resume` | Accepted for scripting clarity; this is already the default whenever a state file exists (§8.2.3) — a stale `DONE` claim is reconciled against the filesystem, not trusted blindly. |
-| `--restart` | Discard any existing state for this module and start over with freshly discovered units. Mutually exclusive with `--resume`. |
+| `--restart` | Discard any existing state for this module and start over with freshly discovered units. Whatever an interrupted unit left in a test file (half-merged tests, an empty test class it had just created) is taken out first, exactly as a resume would. Mutually exclusive with `--resume`. |
 | `--max-units <n>` | Cap the number of units this invocation processes (overrides `execution.maxUnitsPerRun`). |
 | `--dry-run` | Do everything up to the AI call and stop (see below). Same as `execution.dryRun: true`. |
 | `--force-unlock` | Clear a stale lock (from a killed process) before acquiring it for this run. |
@@ -199,11 +199,13 @@ that genuinely has Spring on its classpath is never wrongly rejected.
 **Dry run.** `--dry-run` (or `execution.dryRun: true`) runs discovery - which builds the module
 and measures baseline coverage, touching only `target/` - then stops where the AI call would
 start. It lists the units a real run would attempt, in order and within `--tier` /
-`--max-units`, and writes the exact prompt each would send under `<stateDir>/dry-run/`, so a
+`--max-units` - with an existing `state.json` that means the units of that state still pending
+(not the ones already done), unless `--restart` is given - and writes the exact prompt each would send under `<stateDir>/dry-run/`, so a
 prompt template or a context limit can be checked for free. No AI provider is called, no test
 file is written, backed up or created, and `state.json` is left alone: a later real run starts
 as if the dry run had never happened. (Only the lock file and the `dry-run/` prompts are
-written.)
+written.) With an HTTP provider the model server is not contacted either, so it can be used
+before the server or the model is even set up.
 
 **Backups.** With `execution.backupOriginalTests: true` (the default), an existing test file is
 copied to `<stateDir>/backups/<runId>/` - same layout as the module - just before the first
@@ -514,7 +516,9 @@ aiProvider:
   (an unknown model is 404) and the context refusal are not, since repeating them cannot help.
 - **Privacy.** A `baseUrl` that is not this machine gets a warning: every prompt, including the
   full source of the classes under test, is sent there. `headers` are sent but never written to
-  any message or log; API keys still belong in the real environment.
+  any message or log; API keys still belong in the real environment. A header the JDK's HTTP
+  client refuses (`Host`, `Connection`, `Content-Length`, `Expect`, `Upgrade`, or an illegal
+  name/value) is reported as a configuration error naming it.
 
 ### Adding and verifying a new provider
 

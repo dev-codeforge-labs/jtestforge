@@ -136,7 +136,8 @@ class PromptTemplateLoaderTest {
         assertThat(template.references(PromptPlaceholder.CONTRACT_VIOLATION)).isTrue();
         assertThat(template.references(PromptPlaceholder.PREVIOUS_RESPONSE)).isTrue();
         // The previous answer has its own ``` blocks; only a longer fence can hold it.
-        assertThat(template.rawText()).contains("````text\n{{PREVIOUS_RESPONSE}}\n````");
+        // Line endings normalised: a Windows checkout with core.autocrlf has the template in CRLF.
+        assertThat(template.rawText().replace("\r\n", "\n")).contains("````text\n{{PREVIOUS_RESPONSE}}\n````");
     }
 
     private void scaffoldAllBut(java.nio.file.Path dir, PromptTemplateId missing) throws java.io.IOException {

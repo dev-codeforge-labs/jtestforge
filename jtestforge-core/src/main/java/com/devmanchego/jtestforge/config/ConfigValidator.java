@@ -137,9 +137,28 @@ public final class ConfigValidator {
             errors.add(new ConfigViolation(path + ".model", "is required for a provider of type http."));
         }
         checkBaseUrl(path, provider.baseUrl(), errors, warnings);
+        checkHeaders(path, provider.headers(), errors);
         if (!provider.args().isEmpty()) {
             warnings.add(new ConfigViolation(path + ".args", "is ignored for a provider of type http."));
         }
+    }
+
+    /**
+     * The JDK's HTTP client refuses some header names outright ({@code Host}, {@code Connection},
+     * {@code Content-Length}, {@code Expect}, {@code Upgrade}) and any name or value with illegal
+     * characters, and it does so with an unchecked exception at request time. Asking the client
+     * itself here turns that into a config error naming the header, instead of a stack trace or
+     * a run in which every unit fails.
+     */
+    private void checkHeaders(String path, java.util.Map<String, String> headers, List<ConfigViolation> errors) {
+        headers.forEach((name, value) -> {
+            try {
+                java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://localhost")).header(name, value);
+            } catch (IllegalArgumentException e) {
+                errors.add(new ConfigViolation(path + ".headers." + name,
+                        "cannot be sent: " + e.getMessage()));
+            }
+        });
     }
 
     private void checkBaseUrl(String path, String baseUrl,

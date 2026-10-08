@@ -58,7 +58,7 @@ public final class HttpProviderPreflight {
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
         List<String> notes = new ArrayList<>();
-        String root = baseUrl.strip().replaceAll("/+$", "");
+        String root = OllamaSettings.root(baseUrl);
 
         Exchange version = send(HttpRequest.newBuilder(URI.create(root + "/api/version")).GET(), headers);
         if (version.failure() != null) {
@@ -111,9 +111,11 @@ public final class HttpProviderPreflight {
                     + "fit is refused. Set options.num_ctx (32768 holds the default budget).");
             return;
         }
-        long ctx = numCtx.getAsLong();
-        if (modelContext.isPresent() && ctx > modelContext.getAsLong()) {
-            warnings.add("options.num_ctx (" + ctx + ") is larger than the model's own context ("
+        long configured = numCtx.getAsLong();
+        // The server will not give a model more context than it supports, so that is what fits.
+        long ctx = modelContext.isPresent() ? Math.min(configured, modelContext.getAsLong()) : configured;
+        if (modelContext.isPresent() && configured > modelContext.getAsLong()) {
+            warnings.add("options.num_ctx (" + configured + ") is larger than the model's own context ("
                     + modelContext.getAsLong() + "); the server will not give it more than the model supports.");
         }
         long promptTokens = (long) Math.ceil(maxPromptChars / CHARS_PER_TOKEN);
@@ -123,7 +125,7 @@ public final class HttpProviderPreflight {
         if (promptTokens + outputTokens > ctx) {
             warnings.add("A full " + maxPromptChars + "-character prompt (about " + promptTokens + " tokens"
                     + (outputTokens > 0 ? " plus up to " + outputTokens + " of answer" : "")
-                    + ") may not fit options.num_ctx " + ctx + "; such a prompt is refused, not cut. Raise "
+                    + ") may not fit the usable context of " + ctx + " tokens; such a prompt is refused, not cut. Raise "
                     + "options.num_ctx, or lower maxPromptChars for this provider (about "
                     + Math.max(0, (long) ((ctx - outputTokens) * CHARS_PER_TOKEN)) + " characters fit).");
         }
@@ -142,17 +144,7 @@ public final class HttpProviderPreflight {
     }
 
     private static OptionalLong number(Object value) {
-        if (value instanceof Number number) {
-            return OptionalLong.of(number.longValue());
-        }
-        if (value instanceof String text) {
-            try {
-                return OptionalLong.of(Long.parseLong(text.strip()));
-            } catch (NumberFormatException e) {
-                return OptionalLong.empty();
-            }
-        }
-        return OptionalLong.empty();
+        return OllamaSettings.number(value);
     }
 
     private static JsonNode parse(String body) {
@@ -165,7 +157,7 @@ public final class HttpProviderPreflight {
 
     private Exchange send(HttpRequest.Builder request, Map<String, String> headers) {
         request.timeout(TIMEOUT);
-        headers.forEach(request::header);
+        headers.forEach(request::setHeader);
         try {
             HttpResponse<String> response = client.send(request.build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));

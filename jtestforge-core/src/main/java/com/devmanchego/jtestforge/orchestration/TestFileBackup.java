@@ -43,7 +43,7 @@ public final class TestFileBackup {
      * @throws UncheckedIOException if the copy could not be made
      */
     public Optional<Path> backupOnce(String testFile) {
-        Path source = resolveAgainstModule(testFile);
+        Path source = ModulePaths.resolve(modulePath, testFile);
         if (!Files.isRegularFile(source)) {
             return Optional.empty();
         }
@@ -58,11 +58,6 @@ public final class TestFileBackup {
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to back up " + source + " to " + copy, e);
         }
-    }
-
-    private Path resolveAgainstModule(String testFile) {
-        Path path = Path.of(testFile);
-        return (path.isAbsolute() ? path : modulePath.resolve(path)).toAbsolutePath().normalize();
     }
 
     /** Relative to the module when inside it; otherwise just the file name, never an absolute path. */

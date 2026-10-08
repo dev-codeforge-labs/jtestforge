@@ -18,6 +18,18 @@ none of it could be read. Nothing was added to the test class.
 {{PREVIOUS_RESPONSE}}
 ````
 
+## What those tests were meant to fix
+
+If your previous answer was a repair, this is what it was repairing; if it says `_(none)_`, it was a first attempt.
+
+Compiler errors:
+
+{{COMPILER_ERRORS}}
+
+Failing tests:
+
+{{TEST_FAILURES}}
+
 ## What to do now
 
 Send the tests again - the same ones, if they were right - in **exactly** this shape:

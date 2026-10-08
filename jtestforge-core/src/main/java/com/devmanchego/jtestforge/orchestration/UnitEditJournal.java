@@ -29,4 +29,15 @@ public interface UnitEditJournal {
      * @param addedImports the imports that came with them, likewise
      */
     void record(List<String> addedTests, List<String> addedImports);
+
+    /**
+     * {@code true} right before the unit writes a brand-new skeleton test class, so that an
+     * interrupted unit's cleanup can remove the class again if it is still empty; {@code false}
+     * once the unit is finished with it (it deleted the empty skeleton, or kept something in it).
+     * Without it, a kill during the AI call - where a unit spends nearly all its time - left an
+     * empty class in the developer's source tree: the methods were journalled, the file's
+     * creation was not.
+     */
+    default void recordCreatedTestFile(boolean created) {
+    }
 }

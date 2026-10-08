@@ -111,7 +111,7 @@ public final class HttpAiProvider implements AiProvider {
                 .timeout(timeout)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body));
-        headers.forEach(request::header);
+        headers.forEach(request::setHeader);
 
         HttpResponse<String> response;
         try {
@@ -214,18 +214,7 @@ public final class HttpAiProvider implements AiProvider {
 
     /** {@code options.num_ctx} when configured as a number (or a numeric string). */
     private OptionalLong numCtx() {
-        Object value = options.get("num_ctx");
-        if (value instanceof Number number) {
-            return OptionalLong.of(number.longValue());
-        }
-        if (value instanceof String text) {
-            try {
-                return OptionalLong.of(Long.parseLong(text.strip()));
-            } catch (NumberFormatException e) {
-                return OptionalLong.empty();
-            }
-        }
-        return OptionalLong.empty();
+        return OllamaSettings.number(options.get("num_ctx"));
     }
 
     private static OptionalLong longField(JsonNode json, String name) {
@@ -242,11 +231,7 @@ public final class HttpAiProvider implements AiProvider {
     }
 
     private static URI chatEndpointOf(String baseUrl) {
-        String trimmed = baseUrl.strip();
-        while (trimmed.endsWith("/")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1);
-        }
-        return URI.create(trimmed + "/api/chat");
+        return URI.create(OllamaSettings.root(baseUrl) + "/api/chat");
     }
 
     private static String firstLine(String body) {

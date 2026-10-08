@@ -155,13 +155,10 @@ public final class GenerateEngine {
             // The unit's edits reach state.json before they reach the test file (§8.2.1), so a
             // kill at any instant leaves an IN_PROGRESS unit that names exactly what to revert.
             AtomicReference<RunState> live = new AtomicReference<>(state);
-            WorkUnitId unitId = unit.id();
-            UnitEditJournal journal = (addedTests, addedImports) -> live.updateAndGet(current ->
-                    stateStore.updateUnit(current, current.unit(unitId).orElseThrow().withAdded(addedTests, addedImports)));
-            UnitOutcome outcome = processSafely(unit, contextLookup, journal);
+            UnitOutcome outcome = processSafely(unit, contextLookup, journalInto(live, unit.id()));
             state = live.get();
             long durationMillis = System.currentTimeMillis() - startedAt;
-            state = stateStore.updateUnit(state, applyOutcome(state, unit.id(), outcome, durationMillis));
+            state = stateStore.updateUnit(state, finishedUnit(state, unit.id(), outcome, durationMillis));
             reportProgress("  -> " + outcome.status()
                     + (outcome.succeeded() ? " (" + outcome.addedTests().size() + " test(s) kept)" : ""));
 
@@ -169,7 +166,9 @@ public final class GenerateEngine {
                 anythingKept = true;
                 consecutiveFailures = 0;
             } else if (outcome.status() == UnitStatus.SKIPPED_TEST_FILE_UNREADABLE) {
-                // Says nothing about whether the model is useful - the AI was never asked.
+                // Says nothing about whether the model is useful - the AI was never asked - and
+                // must not use up execution.maxUnitsPerRun / --max-units either.
+                unitsProcessed--;
                 continue;
             } else if (++consecutiveFailures >= executionConfig.consecutiveFailureAbort()) {
                 LOGGER.error("Aborting: {} consecutive units produced nothing usable.", consecutiveFailures);
@@ -210,6 +209,49 @@ public final class GenerateEngine {
 
     private WorkUnit applyOutcome(RunState state, WorkUnitId id, UnitOutcome outcome, long durationMillis) {
         return WorkUnitOutcomes.apply(state.unit(id).orElseThrow(), outcome, durationMillis);
+    }
+
+    /** Writes every journalled edit of unit {@code unitId} to the state file, through {@code live}. */
+    private UnitEditJournal journalInto(AtomicReference<RunState> live, WorkUnitId unitId) {
+        return new UnitEditJournal() {
+            @Override
+            public void record(List<String> addedTests, List<String> addedImports) {
+                live.updateAndGet(current -> stateStore.updateUnit(current,
+                        current.unit(unitId).orElseThrow().withAdded(addedTests, addedImports)));
+            }
+
+            @Override
+            public void recordCreatedTestFile(boolean created) {
+                live.updateAndGet(current -> stateStore.updateUnit(current,
+                        current.unit(unitId).orElseThrow().withCreatedTestFile(created)));
+            }
+        };
+    }
+
+    /**
+     * The unit as it is persisted once processed. A failed outcome carries no edits, which is
+     * right when the unit undid its own - and then its journal is empty too. A journal that still
+     * names something means the unit's rollback itself failed (a test file locked by an IDE or a
+     * virus scanner, say): the edits are still in the file, and overwriting the journal with the
+     * outcome's empty lists would leave them there with no record at all. They are kept instead,
+     * for the shutdown hook, the next run's resume or {@code --restart} to undo
+     * ({@link WorkUnit#hasLeftoverEdits()}).
+     */
+    private WorkUnit finishedUnit(RunState state, WorkUnitId id, UnitOutcome outcome, long durationMillis) {
+        WorkUnit journalled = state.unit(id).orElseThrow();
+        WorkUnit finished = applyOutcome(state, id, outcome, durationMillis);
+        boolean leftovers = !journalled.addedTests().isEmpty() || !journalled.addedImports().isEmpty()
+                || journalled.createdTestFile();
+        if (outcome.succeeded() || !leftovers) {
+            return finished;
+        }
+        LOGGER.error("Unit {} failed and could not undo its edits to {}: tests {}, imports {}{}",
+                id, journalled.testFile(), journalled.addedTests(), journalled.addedImports(),
+                journalled.createdTestFile() ? ", and the test class it created" : "");
+        reportProgress("  WARNING: could not undo this unit's edits to " + journalled.testFile()
+                + " - they are recorded, and the next run takes them out");
+        return finished.withAdded(journalled.addedTests(), journalled.addedImports())
+                .withCreatedTestFile(journalled.createdTestFile());
     }
 
     /**

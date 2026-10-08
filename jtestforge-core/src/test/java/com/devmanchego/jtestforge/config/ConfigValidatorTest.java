@@ -442,11 +442,36 @@ class ConfigValidatorTest {
                 .contains("aiProvider.providers." + active + ".command");
     }
 
+    @Test
+    void headersTheHttpClientRefusesAreConfigErrorsNamingTheHeader() throws Exception {
+        for (String restricted : new String[] {"Host", "Content-Length", "Connection", "Upgrade", "Expect"}) {
+            JTestForgeConfig config = withHttpProvider(fullyValidConfig(), null, "http://localhost:11434", "m", null,
+                    java.util.Map.of(restricted, "x"));
+
+            assertThat(validator.validate(config, validContext()).errors()).as(restricted)
+                    .extracting(ConfigViolation::path).contains("aiProvider.providers.claude.headers." + restricted);
+        }
+    }
+
+    @Test
+    void ordinaryHeadersAreAccepted() throws Exception {
+        JTestForgeConfig config = withHttpProvider(fullyValidConfig(), null, "http://localhost:11434", "m", null,
+                java.util.Map.of("Authorization", "Bearer x", "X-Team", "qa", "Content-Type", "application/json"));
+
+        assertThat(validator.validate(config, validContext()).errors()).isEmpty();
+    }
+
     private static JTestForgeConfig withHttpProvider(
             JTestForgeConfig c, String command, String baseUrl, String model, String api) {
+        return withHttpProvider(c, command, baseUrl, model, api, null);
+    }
+
+    private static JTestForgeConfig withHttpProvider(
+            JTestForgeConfig c, String command, String baseUrl, String model, String api,
+            java.util.Map<String, String> headers) {
         String active = c.aiProvider().active();
         ProviderConfig http = new ProviderConfig(command, null, null, null, null, null, null,
-                ProviderType.HTTP, api, baseUrl, model, null, null, null);
+                ProviderType.HTTP, api, baseUrl, model, null, null, headers);
         return new JTestForgeConfig(c.project(), c.selection(),
                 new AiProviderConfig(active, java.util.Map.of(active, http), c.aiProvider().isolateWorkingDirectory()),
                 c.prompts(), c.spring(), c.context(), c.generate(), c.harden(), c.execution());

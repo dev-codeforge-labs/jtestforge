@@ -154,6 +154,7 @@ public final class DefaultUnitProcessor implements UnitProcessor {
             if (!outcome.succeeded()) {
                 discardSkeletonThisUnitCreated(originalContext.testFile(), edits);
             }
+            releaseCreatedTestFile(edits);
             return outcome;
         } catch (RuntimeException unexpected) {
             // Anything this class did not anticipate - a build runner interrupted, an I/O
@@ -181,8 +182,21 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                 journal.record(List.of(), List.of());
             }
             discardSkeletonThisUnitCreated(testFile, edits);
+            releaseCreatedTestFile(edits);
         } catch (RuntimeException rollbackFailure) {
+            // The journal still names what is left - the engine keeps it, and the next run's
+            // resume (or this run's shutdown hook) undoes it.
             cause.addSuppressed(rollbackFailure);
+        }
+    }
+
+    /**
+     * The unit is done with a skeleton it created - deleted it, or kept tests or a synthesised
+     * mock bean in it - so an interrupted-unit cleanup must no longer consider deleting it.
+     */
+    private void releaseCreatedTestFile(UnitEdits edits) {
+        if (edits.createdTestFile) {
+            journal.recordCreatedTestFile(false);
         }
     }
 
@@ -198,14 +212,7 @@ public final class DefaultUnitProcessor implements UnitProcessor {
         if (!edits.createdTestFile || edits.synthesisedMockBeans) {
             return;
         }
-        if (testClassScanner.inspect(testFile) instanceof com.devmanchego.jtestforge.analysis.TestFileScan.Parsed parsed
-                && parsed.info().testMethodNames().isEmpty()) {
-            try {
-                java.nio.file.Files.deleteIfExists(testFile);
-            } catch (java.io.IOException e) {
-                throw new java.io.UncheckedIOException("Failed to remove the empty test class skeleton " + testFile, e);
-            }
-        }
+        EmptyTestClassCleanup.deleteIfNoTests(testClassScanner, testFile);
     }
 
     private UnitOutcome processUnit(UnitContext originalContext) {
@@ -285,6 +292,8 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                 ? plainSkeletonFor(context)
                 : new SpringTestClassFactory(context.springFacts(), springSupport.mockBeanSetResolver())
                         .renderSkeleton(context.productionClass(), context.unit().tier(), context.testClassSimpleName());
+        // Journalled first, like every other edit: a kill right after the write must still find it.
+        journal.recordCreatedTestFile(true);
         try {
             com.devmanchego.jtestforge.util.AtomicFileWriter.write(context.testFile(), skeleton, sourceCharset);
         } catch (java.io.IOException e) {
@@ -334,7 +343,8 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                     + parsed.violation().message());
             reportProgress("response: unusable format - asking for a corrected answer");
             rawResponse = invoke(context,
-                    promptFactory.fixContractPrompt(context, parsed.violation().message(), rawResponse));
+                    promptFactory.fixContractPrompt(context, parsed.violation().message(), rawResponse,
+                            activeEdits.repairingCompilerErrors, activeEdits.repairingFailures));
             parsed = parse(rawResponse, context);
         }
         parsed.dropped().forEach(drop -> discarded.add(drop.description() + ": " + drop.reason()));
@@ -534,9 +544,15 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                 break;
             }
             revert(context, current);
-            AttemptOutcome repaired = generateAndMergeWithEscalation(context,
-                    promptFactory.fixCompilationPrompt(context, errorsOrRawLogFallback(outcome)),
-                    discarded);
+            List<com.devmanchego.jtestforge.model.CompilerError> errors = errorsOrRawLogFallback(outcome);
+            activeEdits.repairingCompilerErrors = errors;
+            AttemptOutcome repaired;
+            try {
+                repaired = generateAndMergeWithEscalation(context,
+                        promptFactory.fixCompilationPrompt(context, errors), discarded);
+            } finally {
+                activeEdits.repairingCompilerErrors = List.of();
+            }
             if (repaired instanceof EscalationFailed) {
                 return repaired;
             }
@@ -600,8 +616,14 @@ public final class DefaultUnitProcessor implements UnitProcessor {
                 break;
             }
             revert(context, current);
-            AttemptOutcome repaired = generateAndMergeWithEscalation(context,
-                    promptFactory.fixAssertionPrompt(context, outcome.failures()), discarded);
+            activeEdits.repairingFailures = outcome.failures();
+            AttemptOutcome repaired;
+            try {
+                repaired = generateAndMergeWithEscalation(context,
+                        promptFactory.fixAssertionPrompt(context, outcome.failures()), discarded);
+            } finally {
+                activeEdits.repairingFailures = List.of();
+            }
             if (repaired instanceof EscalationFailed) {
                 return repaired;
             }
@@ -738,6 +760,13 @@ public final class DefaultUnitProcessor implements UnitProcessor {
          * model that cannot follow the format twice is not going to on a third try.
          */
         boolean contractCorrectionUsed;
+
+        /**
+         * What the repair request now in flight is answering, so that a corrective re-prompt for
+         * its broken answer can show it again. Empty outside a repair (a first attempt).
+         */
+        List<com.devmanchego.jtestforge.model.CompilerError> repairingCompilerErrors = List.of();
+        List<com.devmanchego.jtestforge.model.SurefireTestResult> repairingFailures = List.of();
 
         /** Attempt number of the last AI call this unit made; see {@link #nextAttemptNumber()}. */
         int lastAttemptNumber;

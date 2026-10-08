@@ -127,6 +127,51 @@ class InterruptHandlerTest {
     }
 
     @Test
+    void aFinishedUnitWhoseRollbackFailedIsCleanedUpToo(@TempDir Path moduleDir) throws IOException {
+        Path testFile = moduleDir.resolve("PaymentServiceTest.java");
+        Files.writeString(testFile, EXISTING_TEST_CLASS);
+        Path stateDir = moduleDir.resolve(".jtestforge");
+        StateStore stateStore = store(stateDir);
+        LockFile lock = LockFile.acquire(stateDir, Clock.fixed(NOW, ZoneOffset.UTC));
+        WorkUnitId id = WorkUnitId.of("com.acme.PaymentService", "classify(int)", Tier.PLAIN_UNIT);
+        WorkUnit leftover = WorkUnit.pending(id, testFile.toString(), "PaymentService.java", "sha256:src")
+                .withStatus(UnitStatus.PROVIDER_ERROR).withAdded(List.of("classify_partiallyMerged"), List.of());
+        stateStore.save(RunState.startNew("run-1", NOW, Phase.GENERATE, moduleDir.toString(), "sha256:cfg",
+                "claude", SpringTierState.springDisabled(40), List.of(leftover)));
+
+        new InterruptHandler(stateStore, lock, new TestClassReverter(), moduleDir).handleInterrupt();
+
+        assertThat(Files.readString(testFile)).doesNotContain("classify_partiallyMerged").contains("anExistingTest");
+    }
+
+    @Test
+    void anEmptySkeletonTheInterruptedUnitCreatedIsRemoved(@TempDir Path moduleDir) throws IOException {
+        // Ctrl+C during the AI call of a unit that had just created the test class.
+        Path testFile = moduleDir.resolve("PaymentServiceTest.java");
+        Files.writeString(testFile, """
+                package com.acme;
+
+                import org.junit.jupiter.api.Test;
+
+                class PaymentServiceTest {
+                }
+                """);
+        Path stateDir = moduleDir.resolve(".jtestforge");
+        StateStore stateStore = store(stateDir);
+        LockFile lock = LockFile.acquire(stateDir, Clock.fixed(NOW, ZoneOffset.UTC));
+        WorkUnitId id = WorkUnitId.of("com.acme.PaymentService", "classify(int)", Tier.PLAIN_UNIT);
+        WorkUnit inProgress = WorkUnit.pending(id, testFile.toString(), "PaymentService.java", "sha256:src")
+                .withStatus(UnitStatus.IN_PROGRESS).withCreatedTestFile(true);
+        stateStore.save(RunState.startNew("run-1", NOW, Phase.GENERATE, moduleDir.toString(), "sha256:cfg",
+                "claude", SpringTierState.springDisabled(40), List.of(inProgress)));
+
+        new InterruptHandler(stateStore, lock, new TestClassReverter(), moduleDir).handleInterrupt();
+
+        assertThat(testFile).doesNotExist();
+        assertThat(Files.exists(lock.lockPath())).isFalse();
+    }
+
+    @Test
     void withNoStateFileAtAllTheHandlerStillReleasesTheLockWithoutThrowing(@TempDir Path moduleDir) {
         Path stateDir = moduleDir.resolve(".jtestforge");
         StateStore stateStore = store(stateDir);
